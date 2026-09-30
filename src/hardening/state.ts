@@ -21,17 +21,25 @@ import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/pro
 import path from "node:path";
 import { PathSafetyError, StateError } from "./errors";
 import {
+  type BackupRecord,
+  type ChangeRecord,
   type HardeningPlan,
   type OperationalContext,
   type PlanStatus,
+  type RollbackRecord,
   SCHEMA_VERSION,
   type ServerInventory,
+  type VerificationResult,
 } from "./models";
 import {
   checkSchemaVersion,
+  validateBackupRecord,
+  validateChangeRecord,
   validateHardeningPlan,
   validateOperationalContext,
+  validateRollbackRecord,
   validateServerInventory,
+  validateVerificationResult,
 } from "./validation";
 
 /** Server ids: lowercase alphanumerics and dashes, 4..64 chars, no dots. */
@@ -40,7 +48,14 @@ export const SERVER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{3,63}$/;
 /** Plan ids: "plan-" followed by lowercase alphanumerics/dashes. */
 export const PLAN_ID_PATTERN = /^plan-[a-z0-9][a-z0-9-]{7,63}$/;
 
-export const SERVER_DIR_LAYOUT = ["plans", "changes", "exceptions", "rollbacks", "verification"] as const;
+export const SERVER_DIR_LAYOUT = [
+  "plans",
+  "backups",
+  "changes",
+  "exceptions",
+  "rollbacks",
+  "verification",
+] as const;
 
 export function assertSafeServerId(serverId: string): void {
   if (typeof serverId !== "string" || !SERVER_ID_PATTERN.test(serverId)) {
@@ -496,4 +511,252 @@ export async function validateAllPlans(
 ): Promise<{ planId: string; valid: boolean; error: string | null }[]> {
   const listings = await listPlans(stateRoot, serverId);
   return listings.map((l) => ({ planId: l.planId, valid: l.state === "valid", error: l.error }));
+}
+
+// ---------------------------------------------------------------------------
+// Changes, verifications, rollbacks and backups (Phase 3)
+// ---------------------------------------------------------------------------
+
+export const BACKUP_ID_PATTERN = /^bkp-[a-z0-9][a-z0-9-]{7,63}$/;
+export const CHANGE_ID_PATTERN = /^chg-[a-z0-9][a-z0-9-]{7,63}$/;
+export const VERIFICATION_ID_PATTERN = /^ver-[a-z0-9][a-z0-9-]{7,63}$/;
+export const ROLLBACK_ID_PATTERN = /^rbk-[a-z0-9][a-z0-9-]{7,63}$/;
+
+export function assertSafeDocumentId(id: string, pattern: RegExp, label: string): void {
+  if (typeof id !== "string" || !pattern.test(id) || id.includes("..") || id.includes("/")) {
+    throw new PathSafetyError(`Invalid ${label}: ${JSON.stringify(id)}. Expected pattern ${pattern.source}`);
+  }
+}
+
+function documentPath(
+  stateRoot: string,
+  serverId: string,
+  subdir: string,
+  id: string,
+  pattern: RegExp,
+  label: string,
+): string {
+  assertSafeDocumentId(id, pattern, label);
+  const dir = path.join(resolveServerDir(stateRoot, serverId), subdir);
+  const target = path.resolve(dir, `${id}.json`);
+  if (!target.startsWith(`${path.resolve(dir)}${path.sep}`)) {
+    throw new PathSafetyError(`Resolved ${label} path ${target} escapes ${subdir}`);
+  }
+  return target;
+}
+
+async function saveDocument(
+  stateRoot: string,
+  serverId: string,
+  subdir: string,
+  id: string,
+  pattern: RegExp,
+  label: string,
+  document: unknown,
+  validate: (input: unknown) => unknown,
+): Promise<string> {
+  validate(document);
+  const target = documentPath(stateRoot, serverId, subdir, id, pattern, label);
+  await ensureServerLayout(stateRoot, serverId);
+  await atomicWriteJson(target, document);
+  return target;
+}
+
+async function loadDocument<T>(
+  stateRoot: string,
+  serverId: string,
+  subdir: string,
+  id: string,
+  pattern: RegExp,
+  label: string,
+  validate: (input: unknown) => T,
+): Promise<T> {
+  const file = documentPath(stateRoot, serverId, subdir, id, pattern, label);
+  let text: string;
+  try {
+    text = await readFile(file, "utf8");
+  } catch (err) {
+    throw new StateError(`No readable ${label} ${id} for ${serverId}`, { cause: err });
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new StateError(`${label} ${id} is corrupt (invalid JSON)`, { cause: err });
+  }
+  checkSchemaVersion(parsed);
+  return validate(parsed);
+}
+
+export function newBackupId(): string {
+  return `bkp-${randomUUID()}`;
+}
+export function newChangeId(): string {
+  return `chg-${randomUUID()}`;
+}
+export function newVerificationId(): string {
+  return `ver-${randomUUID()}`;
+}
+export function newRollbackId(): string {
+  return `rbk-${randomUUID()}`;
+}
+
+export function saveBackup(stateRoot: string, backup: BackupRecord): Promise<string> {
+  return saveDocument(
+    stateRoot,
+    backup.serverId,
+    "backups",
+    backup.backupId,
+    BACKUP_ID_PATTERN,
+    "backup",
+    backup,
+    validateBackupRecord,
+  );
+}
+
+export function loadBackup(stateRoot: string, serverId: string, backupId: string): Promise<BackupRecord> {
+  return loadDocument(
+    stateRoot,
+    serverId,
+    "backups",
+    backupId,
+    BACKUP_ID_PATTERN,
+    "backup",
+    validateBackupRecord,
+  );
+}
+
+export function saveChange(stateRoot: string, change: ChangeRecord): Promise<string> {
+  return saveDocument(
+    stateRoot,
+    change.serverId,
+    "changes",
+    change.changeId,
+    CHANGE_ID_PATTERN,
+    "change",
+    change,
+    validateChangeRecord,
+  );
+}
+
+export function loadChange(stateRoot: string, serverId: string, changeId: string): Promise<ChangeRecord> {
+  return loadDocument(
+    stateRoot,
+    serverId,
+    "changes",
+    changeId,
+    CHANGE_ID_PATTERN,
+    "change",
+    validateChangeRecord,
+  );
+}
+
+export function saveVerification(stateRoot: string, verification: VerificationResult): Promise<string> {
+  return saveDocument(
+    stateRoot,
+    verification.serverId,
+    "verification",
+    verification.verificationId,
+    VERIFICATION_ID_PATTERN,
+    "verification",
+    verification,
+    validateVerificationResult,
+  );
+}
+
+export function loadVerification(
+  stateRoot: string,
+  serverId: string,
+  verificationId: string,
+): Promise<VerificationResult> {
+  return loadDocument(
+    stateRoot,
+    serverId,
+    "verification",
+    verificationId,
+    VERIFICATION_ID_PATTERN,
+    "verification",
+    validateVerificationResult,
+  );
+}
+
+export function saveRollback(stateRoot: string, rollback: RollbackRecord): Promise<string> {
+  return saveDocument(
+    stateRoot,
+    rollback.serverId,
+    "rollbacks",
+    rollback.rollbackId,
+    ROLLBACK_ID_PATTERN,
+    "rollback",
+    rollback,
+    validateRollbackRecord,
+  );
+}
+
+export function loadRollback(
+  stateRoot: string,
+  serverId: string,
+  rollbackId: string,
+): Promise<RollbackRecord> {
+  return loadDocument(
+    stateRoot,
+    serverId,
+    "rollbacks",
+    rollbackId,
+    ROLLBACK_ID_PATTERN,
+    "rollback",
+    validateRollbackRecord,
+  );
+}
+
+async function listDocumentIds(
+  stateRoot: string,
+  serverId: string,
+  subdir: string,
+  pattern: RegExp,
+): Promise<string[]> {
+  let entries: string[];
+  try {
+    entries = await readdir(path.join(resolveServerDir(stateRoot, serverId), subdir));
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.endsWith(".json"))
+    .map((entry) => entry.slice(0, -".json".length))
+    .filter((id) => pattern.test(id));
+}
+
+/** Newest change for a control, by timestamp inside the record. */
+export async function readLatestChange(
+  stateRoot: string,
+  serverId: string,
+  controlId: string,
+): Promise<ChangeRecord | null> {
+  const ids = await listDocumentIds(stateRoot, serverId, "changes", CHANGE_ID_PATTERN);
+  const changes: ChangeRecord[] = [];
+  for (const id of ids) {
+    try {
+      changes.push(await loadChange(stateRoot, serverId, id));
+    } catch {
+      // skip unreadable change
+    }
+  }
+  const matching = changes.filter((c) => c.controlId === controlId);
+  matching.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  return matching[0] ?? null;
+}
+
+export async function listChanges(stateRoot: string, serverId: string): Promise<ChangeRecord[]> {
+  const ids = await listDocumentIds(stateRoot, serverId, "changes", CHANGE_ID_PATTERN);
+  const changes: ChangeRecord[] = [];
+  for (const id of ids) {
+    try {
+      changes.push(await loadChange(stateRoot, serverId, id));
+    } catch {
+      // skip
+    }
+  }
+  changes.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  return changes;
 }

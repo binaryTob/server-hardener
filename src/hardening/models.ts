@@ -673,3 +673,20 @@ export interface VerificationResult {
   evidence: string[];
   error: string | null;
 }
+
+/**
+ * A backup taken before modifying a text configuration file. The content is
+ * stored inline so rollback needs no external artifact.
+ */
+export interface BackupRecord {
+  schemaVersion: number;
+  backupId: string;
+  serverId: string;
+  controlId: string;
+  originalPath: string;
+  createdAt: string;
+  sha256: string;
+  bytes: number;
+  /** UTF-8 content of the backed-up text file (secrets are never backed up). */
+  content: string;
+}

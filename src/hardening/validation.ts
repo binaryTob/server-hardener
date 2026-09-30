@@ -10,7 +10,16 @@
  */
 import { z } from "zod";
 import { UnsupportedSchemaVersionError, ValidationFailureError } from "./errors";
-import { type HardeningPlan, type OperationalContext, SCHEMA_VERSION, type ServerInventory } from "./models";
+import {
+  type BackupRecord,
+  type ChangeRecord,
+  type HardeningPlan,
+  type OperationalContext,
+  type RollbackRecord,
+  SCHEMA_VERSION,
+  type ServerInventory,
+  type VerificationResult,
+} from "./models";
 
 const confidenceSchema = z.enum(["observed", "derived", "unknown"]);
 
@@ -611,6 +620,63 @@ export const verificationResultSchema = z.object({
   evidence: z.array(z.string()),
   error: z.string().nullable(),
 });
+
+export const backupRecordSchema = z.object({
+  schemaVersion: z.literal(SCHEMA_VERSION),
+  backupId: z.string().min(1),
+  serverId: z.string().min(1),
+  controlId: z.string().min(1),
+  originalPath: z.string().min(1),
+  createdAt: z.string().min(1),
+  sha256: z.string().min(1),
+  bytes: z.number().int().nonnegative(),
+  content: z.string(),
+});
+
+function validationIssues(error: z.ZodError): string[] {
+  return error.issues.map((issue) => {
+    const path = issue.path.length > 0 ? issue.path.map(String).join(".") : "(root)";
+    return `${path}: ${issue.message}`;
+  });
+}
+
+export function validateChangeRecord(input: unknown): ChangeRecord {
+  const result = changeRecordSchema.safeParse(input);
+  if (!result.success) {
+    throw new ValidationFailureError("ChangeRecord failed schema validation", validationIssues(result.error));
+  }
+  return result.data as ChangeRecord;
+}
+
+export function validateVerificationResult(input: unknown): VerificationResult {
+  const result = verificationResultSchema.safeParse(input);
+  if (!result.success) {
+    throw new ValidationFailureError(
+      "VerificationResult failed schema validation",
+      validationIssues(result.error),
+    );
+  }
+  return result.data as VerificationResult;
+}
+
+export function validateRollbackRecord(input: unknown): RollbackRecord {
+  const result = rollbackRecordSchema.safeParse(input);
+  if (!result.success) {
+    throw new ValidationFailureError(
+      "RollbackRecord failed schema validation",
+      validationIssues(result.error),
+    );
+  }
+  return result.data as RollbackRecord;
+}
+
+export function validateBackupRecord(input: unknown): BackupRecord {
+  const result = backupRecordSchema.safeParse(input);
+  if (!result.success) {
+    throw new ValidationFailureError("BackupRecord failed schema validation", validationIssues(result.error));
+  }
+  return result.data as BackupRecord;
+}
 
 // Type guards tying the zod schemas to the model contracts.
 export type ValidatedPlan = z.infer<typeof hardeningPlanSchema>;
