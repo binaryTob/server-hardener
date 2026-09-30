@@ -1,15 +1,17 @@
-# Server Hardener — Fases 1 y 2 (Discovery + Planning)
+# Server Hardener — Fases 1, 2 y 3 (Discovery + Planning + Ejecución)
 
 Framework interactivo de hardening de servidores.
 
 - **Fase 1 — Discovery (read-only):** observa el estado actual y genera un
   **inventario validado y persistente**.
 - **Fase 2 — Planning:** convierte `ServerInventory` + contexto operativo en un
-  **`HardeningPlan` determinista y auditable**, sin aplicar ningún cambio.
+  **`HardeningPlan` determinista y auditable**, sin aplicar cambios.
+- **Fase 3 — Guided execution:** aplica los controles aprobados **de a uno**,
+  con **backup, verificación y rollback**, siempre con confirmación explícita.
 
-> Ni la Fase 1 ni la Fase 2 **modifican** el servidor. No aplican hardening, no
-> tocan servicios, firewall, SSH, usuarios, sysctl ni paquetes. Solo observan,
-> razonan y registran evidencia.
+> Ninguna operación modifica el servidor sin confirmación. Discovery es
+> read-only; el plan es un `draft`; y la ejecución hace backup de cada archivo,
+> valida y verifica cada cambio, y puede revertirse.
 
 ## Filosofía
 
@@ -51,10 +53,13 @@ Salida: resumen con identidad, OS, secciones y **gaps de recolección**
 El proyecto incluye:
 
 - Agente: `.opencode/agents/server-hardening-agent.md`
-- Skill: `.opencode/skills/server-discovery/SKILL.md`
+- Skills: `.opencode/skills/server-discovery/`, `hardening-planning/`, `hardening-execution/`
 - Tools:
   - `hardening_inventory` — `collect` | `show` | `validate`
   - `hardening_state` — `status` | `list-inventories` | `load-inventory` | `validate-state`
+  - `hardening_context` — `show` | `set` | `answer` | `validate`
+  - `hardening_plan` — `generate` | `show` | `validate` | `explain-control`
+  - `hardening_execute` — `preview` | `apply` | `verify` | `rollback`
 
 Ejemplos de invocación del agente:
 
@@ -153,6 +158,48 @@ Questions required before continuing: ...
 Status: draft — review only. No changes are applied by Phase 2.
 ```
 
+## Fase 3 — Ejecución guiada (`hardening_execute`)
+
+Aplica los controles aprobados **de a uno**, con preview, backup, verificación y
+rollback. Nunca sin confirmación.
+
+```text
+hardening_execute { "action": "preview", "controlId": "KRN-003" }
+hardening_execute { "action": "apply",   "controlId": "KRN-003", "confirm": true }
+hardening_execute { "action": "verify",  "controlId": "KRN-003" }
+hardening_execute { "action": "rollback","controlId": "KRN-003", "confirm": true }
+```
+
+- `preview` es **read-only**: muestra estado actual/deseado, impacto, archivos a
+  respaldar, comandos y advertencias.
+- `apply`/`rollback` requieren `confirm: true` (el agente pide confirmación antes).
+- Solo se aplican controles que el plan marcó `non-compliant` o `requires-review`.
+- Requiere root para los cambios que lo necesitan (no se ejecuta `sudo`).
+- Cada cambio se **respalda**, se **verifica** (no solo exit code) y se registra.
+
+Ejemplo de diálogo del agente:
+
+```text
+Encontré 14 cambios recomendados.
+
+Bajo riesgo:  1. ASLR   2. Restringir ptrace   3. Deshabilitar ICMP redirects
+Medio:        4. Habilitar auditd   5. SSH MaxAuthTries
+Alto riesgo:  6. Deshabilitar password de SSH   7. Firewall default deny
+
+¿Qué querés aplicar?  [A] Bajo riesgo   [S] Seleccionar   [D] Ver detalles
+
+KRN-003 — Restringir ptrace
+Current: kernel.yama.ptrace_scope = 0
+Target:  kernel.yama.ptrace_scope = 1
+Impact:  Low
+Apply? [yes/no]
+```
+
+Cobertura automática: sysctl (KRN-001..004), SSH (SSH-001..005), firewall
+(FW-001, ufw/firewalld), servicios inseguros (SVC-001), auditd/rsyslog
+(AUD-001/002, LOG-001), fstab (FS-001/002). El resto es `manual remediation
+required`.
+
 ## Salida / persistencia
 
 ```
@@ -160,9 +207,12 @@ state/
 └── <server-id>/
     ├── inventory.json
     ├── context.json
-    ├── plans/
-    │   └── <plan-id>.json
-    ├── changes/  exceptions/  rollbacks/  verification/
+    ├── plans/<plan-id>.json
+    ├── backups/<backup-id>.json      # contenido + sha256 del archivo
+    ├── changes/<change-id>.json      # target, before/after, resultado
+    ├── rollbacks/<rollback-id>.json  # estrategia + artefactos
+    ├── verification/<ver-id>.json
+    └── exceptions/
 ```
 
 - `server-id` es estable: `srv-` + SHA-256 del `machine-id` (nunca el hostname
@@ -224,12 +274,12 @@ src/hardening/            models, errors, exec, fsio, collectors, parsers,
 src/hardening/controls/   catálogo de controles (por dominio) + catalog.ts
 src/hardening/planning/   context, applicability, risk, preconditions,
                           evaluate, questions, plan, presentation
-.opencode/                agente, skills (discovery + planning), tools
+src/hardening/remediation/ fsops, config, sysctl, ssh, firewall, services,
+                          logging, filesystem, registry, run
+.opencode/                agente, skills (discovery/planning/execution), tools
 scripts/collect.ts        CLI de discovery
-tests/                    parsers, inventory, persistence, security,
-                          context, applicability, risk, preconditions, plan,
-                          planning-security (+fixtures)
-docs/ARCHITECTURE.md      arquitectura detallada (Fases 1 y 2)
+tests/                    discovery, planning y ejecución (+fixtures)
+docs/ARCHITECTURE.md      arquitectura detallada (Fases 1-3)
 ```
 
 ## Seguridad
@@ -245,17 +295,17 @@ docs/ARCHITECTURE.md      arquitectura detallada (Fases 1 y 2)
 
 ## Limitaciones (no implementado a propósito)
 
-- remediación, ejecución de planes, rollback y verificación de cambios;
-- cambios de firewall, SSH, PAM, sysctl, filesystem, servicios o paquetes;
-- motor de benchmarks CIS, OpenSCAP, scoring numérico;
-- aprobación de planes (solo existe `draft`);
-- controles Windows/BSD (el modelo ya declara `platform`);
-- evidencia aún no recolectada (config SSH, sysctl): esos controles quedan
-  `unknown`, nunca se inventan.
+- Windows, remote fleet management, web UI, scheduler, orchestration, HA;
+- scoring, pentesting, dashboards de compliance, policy-as-code complejo;
+- remediación automática de controles que requieren criterio humano (el resto
+  queda como `manual remediation required`);
+- nftables: solo preview (no se generan reglas automáticamente);
+- desinstalación de paquetes: no automática (`manual rollback required`);
+- controles Windows/BSD y evidencia aún no recolectada (config SSH ampliada,
+  sysctl en discovery): quedan `unknown`, nunca se inventan.
 
-Los contratos (`HardeningPlan`, `ChangeRecord`, `ExceptionRecord`,
-`RollbackRecord`, `VerificationResult`) existen en `src/hardening/models.ts` para
-las fases siguientes; la Fase 2 solo produce `HardeningPlan` en estado `draft`.
+El motor transaccional es intencionalmente simple: backup + apply + verify +
+rollback por control; no hay transacciones distribuidas ni event sourcing.
 
 ## Licencia
 

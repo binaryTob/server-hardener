@@ -469,3 +469,77 @@ extended.
   controls exist today.
 - **Evidence expansion**: collect SSH effective config and sysctl values to turn
   the current `unknown` kernel/SSH controls into evaluable ones.
+
+---
+
+# Phase 3 — Guided execution
+
+Phase 3 makes the product usable end to end: the agent now applies hardening
+**interactively, one control at a time, with backup, verification and rollback**.
+
+## 27. Pipeline addition
+
+```
+HardeningPlan (draft)
+        ↓  operator selects controls
+   hardening_execute
+        ↓
+  preview → confirm → apply → verify → (rollback)
+        ↓
+state/<server-id>/{backups,changes,verification,rollbacks}/
+```
+
+## 28. Safety model
+
+- **No arbitrary shell.** `hardening_execute` accepts only
+  `action`, `serverId`, `planId`, `controlId`, `target`, `confirm`. Commands are
+  fixed argvs defined in the remediation modules, executed through the same
+  `CommandRunner` used by discovery (no shell, timeouts, output caps).
+- **Explicit confirmation.** `apply` and `rollback` require `confirm: true`; the
+  agent is instructed to obtain it from the operator first.
+- **Approved controls only.** Apply is allowed only when the plan status is
+  `non-compliant` or `requires-review`. `unknown`, `requires-context`,
+  `blocked`, `compliant`, `not-applicable` are refused.
+- **Root required, never sudo.** Changes that need root refuse to run without
+  it; the framework never escalates privileges itself.
+- **Manual-only fallback.** Controls without a safe automatic remediation return
+  `manual remediation required` and never apply.
+
+## 29. Backups, changes, rollback
+
+- Every file edit is preceded by a `BackupRecord` (content + SHA-256) stored at
+  `state/<server-id>/backups/`.
+- Each apply writes a `ChangeRecord` (target, before/after JSON, result) and,
+  when reversible, a `RollbackRecord` (strategy + backup artifacts).
+- Rollback restores the backup (and service/state) from those records. When a
+  change cannot be reversed automatically (e.g. package installation) the
+  framework reports `manual rollback required`.
+
+## 30. Verification (not exit codes)
+
+Each remediation verifies real state: runtime sysctl values; `sshd -t` plus the
+effective directive plus the service being active; `systemctl is-active` /
+`is-enabled`; `ufw status` / `firewall-cmd --state`; the resulting fstab entry.
+
+## 31. Remediation coverage (Phase 3)
+
+| Domain | Controls | Notes |
+| --- | --- | --- |
+| sysctl | KRN-001..004 | managed drop-in + runtime, conflict detection |
+| SSH | SSH-001..005 | backup, edit, `sshd -t`, reload; lockout controls gated |
+| firewall | FW-001 | ufw/firewalld, admin access preserved; nftables manual |
+| services | SVC-001 | disable/stop known-insecure services only |
+| logging/audit | AUD-001/002, LOG-001 | install (confirmed) / enable |
+| filesystem | FS-001/002 | fstab options; no automatic remount |
+
+Everything else is manual by design.
+
+## 32. Testing (Phase 3)
+
+`execution.test.ts` covers preview-is-read-only, backup contents, apply, verify,
+rollback, `sshd -t` failure restoration, sysctl runtime+persistence, service
+change, firewall safety (nftables never automated; ufw allows admin port first),
+fstab edits, refusal of non-approved controls, root gate, and tool argument
+safety. Tests never touch the real host (temporary paths + a mutable fake
+runner).
+
