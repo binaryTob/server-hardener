@@ -1,12 +1,15 @@
-# Server Hardener — Fase 1 (Discovery)
+# Server Hardener — Fases 1 y 2 (Discovery + Planning)
 
-Framework interactivo de hardening de servidores. Esta **Fase 1** implementa
-únicamente el núcleo de **descubrimiento (discovery) read-only**: observa el
-estado actual del servidor y genera un **inventario validado y persistente**.
+Framework interactivo de hardening de servidores.
 
-> La Fase 1 **no modifica** nada del servidor. No aplica hardening, no toca
-> servicios, firewall, SSH, usuarios ni paquetes. Solo observa y registra
-> evidencia.
+- **Fase 1 — Discovery (read-only):** observa el estado actual y genera un
+  **inventario validado y persistente**.
+- **Fase 2 — Planning:** convierte `ServerInventory` + contexto operativo en un
+  **`HardeningPlan` determinista y auditable**, sin aplicar ningún cambio.
+
+> Ni la Fase 1 ni la Fase 2 **modifican** el servidor. No aplican hardening, no
+> tocan servicios, firewall, SSH, usuarios, sysctl ni paquetes. Solo observan,
+> razonan y registran evidencia.
 
 ## Filosofía
 
@@ -15,9 +18,9 @@ estado actual del servidor y genera un **inventario validado y persistente**.
    solo porque parece inseguro.
 3. Seguridad y disponibilidad tienen igual importancia.
 4. Los cambios futuros serán explícitos, trazables, verificables y reversibles.
-5. Toda recomendación futura conservará la evidencia que originó la decisión.
-6. La Fase 1 no ejecuta remediaciones, comandos destructivos ni cambios de
-   configuración; discovery es estrictamente read-only.
+5. Toda recomendación conserva la evidencia que originó la decisión.
+6. Ninguna fase actual ejecuta remediaciones, comandos destructivos ni cambios
+   de configuración; discovery es estrictamente read-only y planning no aplica.
 
 ## Requisitos
 
@@ -67,16 +70,99 @@ hardening_state    { "action": "validate-state" }
 ```
 
 Las tools aceptan **solo acciones acotadas**: no existe ningún modo de ejecutar
-comandos arbitrarios ni shell. Si pedís hardening en Fase 1, el agente explica
-que todavía no está implementado.
+comandos arbitrarios ni shell.
+
+## Fase 2 — Planning
+
+La Fase 2 responde, de forma **determinista**, qué controles aplican, su estado,
+su riesgo, sus precondiciones, qué información falta y en qué orden considerarlos.
+El **engine** decide (no el LLM); el agente solo recoge el contexto que falta y
+explica el resultado. No aplica cambios.
+
+### Contexto operativo (`hardening_context`)
+
+Hechos que no pueden inferirse del servidor (entorno, exposición, redes de
+gestión, rutas de administración, roles, ventana de mantenimiento).
+
+```text
+hardening_context { "action": "show" }
+hardening_context { "action": "set", "values": {
+  "environment": "production",
+  "internetExposure": "direct",
+  "management.secondaryPathConfirmed": true
+}}
+hardening_context { "action": "answer", "questionId": "q-management-consoleAccess", "value": true }
+```
+
+Los roles se **proponen** (`derived`) a partir de la evidencia y el operador los
+confirma o corrige (`roles`). Se persiste en `state/<server-id>/context.json`.
+
+### Plan (`hardening_plan`)
+
+```text
+hardening_plan { "action": "generate" }
+hardening_plan { "action": "show" }
+hardening_plan { "action": "validate" }
+hardening_plan { "action": "explain-control", "controlId": "SSH-002" }
+```
+
+`generate` carga inventario + contexto, evalúa ~40 controles (~13 categorías),
+ordena por fases operativas y persiste un plan `draft` en
+`state/<server-id>/plans/<plan-id>.json`, con conteos por estado, preguntas sin
+resolver, blockers y warnings.
+
+### Estados de evaluación
+
+`compliant` · `non-compliant` · `not-applicable` · `unknown` ·
+`requires-context` · `requires-review` · `blocked` · `unsupported` · `error`.
+
+No todo es PASS/FAIL: un valor que parece inseguro pero está justificado no es
+`non-compliant`; la falta de evidencia es `unknown`; la falta de contexto es
+`requires-context`; lo que necesita criterio humano es `requires-review`; una
+precondición crítica no satisfecha **bloquea** el control.
+
+### Riesgo
+
+Niveles explícitos (`none|low|medium|high|critical|unknown`) **sin score
+numérico**. El mismo control cambia de riesgo según contexto: deshabilitar el
+password de SSH es `lockout=low` con ruta secundaria confirmada y
+`lockout=critical` sin ella.
+
+### Flujo recomendado
+
+```text
+inventory → contexto → preguntas mínimas → contexto → plan → explicar y PARAR
+```
+
+Ejemplo de resumen de plan:
+
+```text
+Controls evaluated: 40
+
+  compliant            12
+  non-compliant         7
+  requires-context      6
+  requires-review       5
+  blocked               3
+  unknown               5
+
+High security impact: SSH-001, FW-001, AUD-001 ...
+Potential lockout:    SSH-002, SSH-001 ...
+Blocked: SSH-001 (secondary-management-path no confirmado)
+Questions required before continuing: ...
+Status: draft — review only. No changes are applied by Phase 2.
+```
 
 ## Salida / persistencia
 
 ```
 state/
 └── <server-id>/
-    ├── inventory.json      # ServerInventory (schemaVersion: 1)
-    ├── plans/  changes/  exceptions/  rollbacks/  verification/
+    ├── inventory.json
+    ├── context.json
+    ├── plans/
+    │   └── <plan-id>.json
+    ├── changes/  exceptions/  rollbacks/  verification/
 ```
 
 - `server-id` es estable: `srv-` + SHA-256 del `machine-id` (nunca el hostname
@@ -133,12 +219,17 @@ bun run build      # tsc -> dist/
 Estructura:
 
 ```
-src/hardening/        models, errors, exec, fsio, collectors, parsers,
-                      inventory, validation, state
-.opencode/            agent, skill, tools
-scripts/collect.ts    CLI de discovery
-tests/                parsers, inventory, persistence, security (+fixtures)
-docs/ARCHITECTURE.md  arquitectura detallada
+src/hardening/            models, errors, exec, fsio, collectors, parsers,
+                          inventory, validation, state
+src/hardening/controls/   catálogo de controles (por dominio) + catalog.ts
+src/hardening/planning/   context, applicability, risk, preconditions,
+                          evaluate, questions, plan, presentation
+.opencode/                agente, skills (discovery + planning), tools
+scripts/collect.ts        CLI de discovery
+tests/                    parsers, inventory, persistence, security,
+                          context, applicability, risk, preconditions, plan,
+                          planning-security (+fixtures)
+docs/ARCHITECTURE.md      arquitectura detallada (Fases 1 y 2)
 ```
 
 ## Seguridad
@@ -152,16 +243,19 @@ docs/ARCHITECTURE.md  arquitectura detallada
 - Sin traversal: los `server-id` se validan y todo path resuelto debe quedar
   dentro de `state/`.
 
-## Limitaciones de Fase 1 (no implementado a propósito)
+## Limitaciones (no implementado a propósito)
 
-- hardening, remediación, rollback y verificación de cambios;
-- cambios de firewall, SSH, PAM, sysctl, filesystem o paquetes;
-- motor de benchmarks CIS, OpenSCAP, perfiles de hardening, scoring;
-- discovery completo de Windows/BSD.
+- remediación, ejecución de planes, rollback y verificación de cambios;
+- cambios de firewall, SSH, PAM, sysctl, filesystem, servicios o paquetes;
+- motor de benchmarks CIS, OpenSCAP, scoring numérico;
+- aprobación de planes (solo existe `draft`);
+- controles Windows/BSD (el modelo ya declara `platform`);
+- evidencia aún no recolectada (config SSH, sysctl): esos controles quedan
+  `unknown`, nunca se inventan.
 
-Los contratos (`HardeningControl`, `HardeningPlan`, `ChangeRecord`,
-`ExceptionRecord`, `RollbackRecord`, `VerificationResult`) ya existen en
-`src/hardening/models.ts` para las fases siguientes.
+Los contratos (`HardeningPlan`, `ChangeRecord`, `ExceptionRecord`,
+`RollbackRecord`, `VerificationResult`) existen en `src/hardening/models.ts` para
+las fases siguientes; la Fase 2 solo produce `HardeningPlan` en estado `draft`.
 
 ## Licencia
 

@@ -1,4 +1,8 @@
-# Architecture — Server Hardening Framework (Phase 1)
+# Architecture — Server Hardening Framework
+
+> Phase 1: read-only discovery and a validated, persistent `ServerInventory`.
+> Phase 2: deterministic planning — turn `ServerInventory` + `OperationalContext`
+> into a draft `HardeningPlan`, still with **zero changes to the server**.
 
 ## 1. Objectives
 
@@ -269,3 +273,199 @@ scoring, full Windows discovery, penetration testing.
 
 All tests are deterministic and use fakes/fixtures; no real system command runs
 in the suite.
+
+---
+
+# Phase 2 — Planning
+
+Phase 2 answers, deterministically and auditably:
+
+> which controls apply, what their state is, what changing them would risk,
+> what preconditions exist, what information is missing, and in what order they
+> should be considered.
+
+It does **not** apply anything. Execution begins in a later phase.
+
+## 12. Pipeline
+
+```
+             Server
+               ↓
+          Discovery                    (Phase 1, read-only)
+               ↓
+        ServerInventory ─────────────┐
+               │                     │
+               ↓                     ↓
+       OperationalContext       ControlCatalog
+               │                     │
+               └──────────┬──────────┘
+                          ↓
+                 Applicability
+                          ↓
+                   Risk Engine
+                          ↓
+                 Preconditions
+                          ↓
+                  HardeningPlan
+                          ↓
+                     REVIEW
+```
+
+Data flows one way. All four engines are pure functions over
+`(ServerInventory, OperationalContext, ControlDefinition)`; no engine executes a
+command or reads the host.
+
+## 13. Trust boundary between the LLM and the engine
+
+This is the central Phase 2 design rule:
+
+> The **engine** decides applicability, compliance, risk, preconditions,
+> blockers and ordering. The **LLM** gathers missing context and explains the
+> result. The LLM never decides whether a control is compliant or risky.
+
+Concretely:
+
+- Control definitions are **code** (`src/hardening/controls/*.ts`) whose
+  `applicability`, `assess`, `adjustRisk` and `preconditions` are pure
+  functions. The model cannot alter them through prompts or tool arguments.
+- Tool arguments are bounded: `hardening_context` writes only schema-validated
+  context paths; `hardening_plan` only generates/reads/validates plans.
+  Neither accepts a command, a file path, or an arbitrary write.
+- The context is operator-supplied truth, never inferred by the model.
+
+## 14. OperationalContext
+
+Operational facts that cannot be inferred reliably from the server. Stored at
+`state/<server-id>/context.json` (schema-validated, atomic, path-safe).
+
+- `environment`, `criticality`, `internetExposure`, `highAvailability`
+- `roles`: `RoleAssignment[]` with `confidence: "confirmed" | "derived"`.
+  Detection only **proposes** derived roles from inventory evidence; the
+  operator confirms or corrects them.
+- `management`: `methods`, `secondaryPathConfirmed`, `consoleAccess`
+- `networks`: `administrative`, `service` (CIDR)
+- `reboot`: `allowed`, `maintenanceWindowAvailable`
+- `operatorNotes`
+
+Absent values are explicit (`null` / `unknown` / `[]`), so "missing" is never
+confused with "false". `contextCompleteness()` lists the decision-critical
+fields.
+
+## 15. Control catalog
+
+`src/hardening/controls/` — one module per domain (`ssh`, `identity`,
+`privileged`, `services`, `firewall`, `network`, `logging`, `auditing`, `time`,
+`kernel`, `filesystem`, `packages`, `containers`), aggregated by `catalog.ts`
+with a `catalogVersion`. ~40 controls. Each definition declares metadata
+(category, phase, platform, desired state, approval, reversibility,
+references, tags) plus its pure evaluation functions. No proprietary benchmark
+text is copied; controls are expressed from public guidance.
+
+## 16. Evaluation states
+
+`compliant`, `non-compliant`, `not-applicable`, `unknown`,
+`requires-context`, `requires-review`, `blocked`, `unsupported`, `error`.
+
+Deliberately richer than PASS/FAIL: a value that looks insecure but is
+operationally justified is not "non-compliant". Missing evidence yields
+`unknown`; missing operational truth yields `requires-context`; human judgement
+yields `requires-review`.
+
+## 17. Applicability engine
+
+`decideApplicability()` gates on `operatingSystem.family` first (→
+`unsupported`/`unknown`), then delegates to the control's `applicability`. It
+distinguishes "no SSH server" (`not-applicable`) from "SSH state could not be
+read" (`unknown`).
+
+## 18. Risk engine
+
+`assessRisk()` starts from the control's context-independent `baseRisk` and lets
+the control adjust for context. Levels are explicit
+(`none|low|medium|high|critical|unknown`); **no numeric score exists**. The same
+control carries different risk on different hosts. Example: disabling SSH
+password authentication is `lockout=low` when a secondary management path and
+console access are confirmed, and `lockout=critical` when neither exists.
+
+## 19. Precondition engine
+
+Controls declare preconditions (`alternative-admin-user`,
+`privilege-escalation-available`, `secondary-management-path`,
+`console-access-confirmed`, ...). Status is `satisfied | unsatisfied | unknown`.
+A **critical unsatisfied precondition blocks the control** (not merely "risky");
+a critical unknown precondition with missing context surfaces as
+`requires-context`, and without a question path as `blocked`.
+
+## 20. Plan generator and ordering
+
+`generatePlan()` evaluates the catalog, then orders controls by
+`(phaseIndex, declared order, controlId)`:
+
+```
+prerequisites → foundational → logging-visibility → identity →
+services → network → access → disruptive
+```
+
+Deterministic: same inventory + context + catalog ⇒ identical evaluations and
+order. Only ids/timestamps vary (injectable). The plan stores evaluated controls,
+counts by state, unresolved questions, blockers and warnings, with status
+`draft`. Questions are generated **only** for context the engine actually
+needed, each listing the controls it affects.
+
+## 21. Evidence linkage
+
+Every conclusion references the inventory/context by path (`EvidenceRef`), e.g.
+`securityControls.data.firewall.active`. The full inventory is never duplicated
+inside a plan; references and observed values only.
+
+## 22. Persistence (Phase 2 additions)
+
+```
+state/<server-id>/
+├── inventory.json
+├── context.json
+└── plans/<plan-id>.json
+```
+
+Same guarantees as Phase 1: validated before write, atomic rename, path-safe
+identifiers (`SERVER_ID_PATTERN`, `PLAN_ID_PATTERN`), `schemaVersion: 1`.
+Existing inventories remain valid.
+
+## 23. Tools (Phase 2)
+
+- `hardening_context` — `show` / `set` (values keyed by context path) /
+  `answer` (by generated question id) / `validate`.
+- `hardening_plan` — `generate` / `show` / `validate` / `explain-control`.
+
+Both reject unknown arguments and traversal ids; neither can run a command or
+write outside `state/`.
+
+## 24. Testing (Phase 2)
+
+| Suite | Covers |
+| --- | --- |
+| `context.test.ts` | valid/invalid/partial context, role proposals, answers, persistence, corruption, schema mismatch |
+| `applicability.test.ts` | applicable / not-applicable / unknown / unsupported / requires-context |
+| `risk.test.ts` | same control, different risk by context (SSH password auth) |
+| `preconditions.test.ts` | satisfied / unsatisfied / unknown; critical unsatisfied → blocked |
+| `plan.test.ts` | determinism, ordering, counts, questions, blockers, unknowns, partial inventory, catalog integrity |
+| `planning-security.test.ts` | bounded tool args, no shell, traversal rejection, no writes outside state |
+
+## 25. What Phase 2 does not do
+
+No remediation, no configuration changes (firewall, SSH, services, users,
+packages, sysctl), no approval workflow, no execution/rollback/verification, no
+scoring. Controls whose evidence is not yet collected (SSH config, sysctl) are
+reported as `unknown` — never invented — and become evaluable when collection is
+extended.
+
+## 26. Future extension
+
+- **Execution**: approved plans produce `ChangeRecord`s with before/after
+  evidence and `RollbackRecord`s, each verified with a `VerificationResult`;
+  exceptions capture documented, accepted risks (e.g. "`/tmp` cannot use
+  `noexec` because Application X runs temporary scripts").
+- **Windows/BSD**: catalog controls declare `platform`; only OSFamily/Linux
+  controls exist today.
+- **Evidence expansion**: collect SSH effective config and sysctl values to turn
+  the current `unknown` kernel/SSH controls into evaluable ones.
