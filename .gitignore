@@ -1,0 +1,9 @@
+node_modules/
+dist/
+biome.jsonc
+# Persisted state contains host inventory data (users, sockets, packages).
+# Keep directory structure only.
+state/*
+!state/.gitkeep
+*.log
+.DS_Store
