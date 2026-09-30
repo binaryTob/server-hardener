@@ -373,51 +373,219 @@ export type SectionName = keyof Omit<
 >;
 
 // ---------------------------------------------------------------------------
-// Contracts for future phases (not populated or applied in Phase 1)
+// Operational context (Phase 2)
+//
+// Operational facts that cannot be inferred reliably from the server itself.
+// They are supplied by the operator, never guessed. Absent values are
+// explicitly null/unknown so "missing" is distinguishable from "false".
 // ---------------------------------------------------------------------------
 
-export type ControlSeverity = "info" | "low" | "medium" | "high" | "critical";
+export type Environment = "production" | "staging" | "development" | "testing" | "unknown";
 
-export type ControlCategory =
-  | "os"
-  | "network"
-  | "services"
-  | "users"
-  | "authentication"
+export type Criticality = "low" | "medium" | "high" | "critical" | "unknown";
+
+export type InternetExposure = "direct" | "indirect" | "none" | "unknown";
+
+/** Reusable server roles. A host can have several roles simultaneously. */
+export type ServerRole =
+  | "generic-server"
+  | "web-server"
+  | "application-server"
+  | "database"
+  | "container-host"
+  | "kubernetes-node"
+  | "bastion"
+  | "monitoring"
   | "logging"
-  | "filesystem"
-  | "packages"
-  | "kernel";
+  | "file-server"
+  | "directory-service"
+  | "automation"
+  | "unknown";
+
+export type RoleConfidence = "confirmed" | "derived";
 
 /**
- * A hardening control. Phase 1 defines the contract only: no control library
- * (CIS or otherwise) is populated, and no control is evaluated or applied.
+ * A role assigned to the server. `confirmed` roles come from the operator;
+ * `derived` roles are proposals backed by inventory evidence and must not be
+ * treated as operational truth until confirmed.
  */
-export interface HardeningControl {
-  id: string;
-  title: string;
-  description: string;
-  category: ControlCategory;
-  rationale: string;
-  severity: ControlSeverity;
-  applicability: {
-    osFamilies: OSFamily[];
-    /** Additional matchers (e.g. "systemd", "ufw") for future refinement. */
-    requires?: string[];
+export interface RoleAssignment {
+  role: ServerRole;
+  confidence: RoleConfidence;
+  source: string;
+}
+
+export type ManagementMethod =
+  | "ssh"
+  | "ssh-via-bastion"
+  | "vpn"
+  | "console"
+  | "serial-console"
+  | "out-of-band"
+  | "rdp"
+  | "web-console"
+  | "automation"
+  | "other";
+
+export interface OperationalContext {
+  schemaVersion: number;
+  serverId: string;
+  updatedAt: string;
+  environment: Environment;
+  criticality: Criticality;
+  internetExposure: InternetExposure;
+  roles: RoleAssignment[];
+  management: {
+    methods: ManagementMethod[];
+    secondaryPathConfirmed: boolean | null;
+    consoleAccess: boolean | null;
   };
+  /** Operator-declared networks (CIDR). Empty when not declared. */
+  networks: {
+    administrative: string[];
+    service: string[];
+  };
+  reboot: {
+    allowed: boolean | null;
+    maintenanceWindowAvailable: boolean | null;
+  };
+  highAvailability: boolean | null;
+  operatorNotes: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Control evaluation and planning (Phase 2)
+// ---------------------------------------------------------------------------
+
+export type ControlCategory =
+  | "identity"
+  | "privileged-access"
+  | "ssh"
+  | "network"
+  | "firewall"
+  | "services"
+  | "packages"
+  | "filesystem"
+  | "kernel"
+  | "logging"
+  | "auditing"
+  | "time"
+  | "containers";
+
+export type RiskLevel = "none" | "low" | "medium" | "high" | "critical" | "unknown";
+
+export type ApplicabilityStatus =
+  | "applicable"
+  | "not-applicable"
+  | "unknown"
+  | "unsupported"
+  | "requires-context";
+
+/**
+ * Explicit evaluation outcome. Deliberately richer than PASS/FAIL: a value
+ * that is insecure-looking but operationally justified is not "non-compliant".
+ */
+export type ControlEvaluationStatus =
+  | "compliant"
+  | "non-compliant"
+  | "not-applicable"
+  | "unknown"
+  | "requires-context"
+  | "requires-review"
+  | "blocked"
+  | "unsupported"
+  | "error";
+
+/** A reference back into the inventory or context, never a duplicated copy. */
+export interface EvidenceRef {
+  inventoryPath: string;
+  observed: string | null;
+  note?: string;
+}
+
+export interface ApplicabilityDecision {
+  status: ApplicabilityStatus;
+  rationale: string;
+  evidence: EvidenceRef[];
+  missingContext: string[];
+  confidence: Confidence;
+}
+
+export type PreconditionStatus = "satisfied" | "unsatisfied" | "unknown";
+
+export interface Precondition {
+  id: string;
+  description: string;
+  /** A critical precondition that is not satisfied blocks the control. */
+  critical: boolean;
+  status: PreconditionStatus;
+  evidence: EvidenceRef[];
+  missingContext: string[];
+  reason: string | null;
+}
+
+export interface RiskAssessment {
+  securityImpact: RiskLevel;
+  availabilityRisk: RiskLevel;
+  lockoutRisk: RiskLevel;
+  operationalComplexity: RiskLevel;
+  rationale: string;
+}
+
+/** Operational ordering buckets. Lower index = considered earlier. */
+export type PlanPhase =
+  | "prerequisites"
+  | "foundational"
+  | "logging-visibility"
+  | "identity"
+  | "services"
+  | "network"
+  | "access"
+  | "disruptive";
+
+/** A single evaluated control as persisted inside a plan. */
+export interface PlannedControl {
+  controlId: string;
+  title: string;
+  category: ControlCategory;
+  phase: PlanPhase;
+  phaseIndex: number;
+  order: number;
+  status: ControlEvaluationStatus;
   currentState: string | null;
   desiredState: string;
-  securityImpact: string;
-  availabilityRisk: string;
-  lockoutRisk: string;
+  applicability: ApplicabilityDecision;
+  risk: RiskAssessment;
+  preconditions: Precondition[];
+  blockers: string[];
+  missingContext: string[];
+  evidence: EvidenceRef[];
   requiresApproval: boolean;
   reversible: boolean;
-  dependencies: string[];
-  /** References into inventory evidence that motivated the decision. */
-  evidenceReferences: string[];
-  references: string[];
   tags: string[];
 }
+
+export type QuestionType = "boolean" | "single-choice" | "multi-choice" | "text" | "cidr-list";
+
+/** A decision-changing question. Generated by the engine, not the LLM. */
+export interface PlanningQuestion {
+  id: string;
+  prompt: string;
+  reason: string;
+  affectedControls: string[];
+  type: QuestionType;
+  options?: string[];
+  /** Context field the answer populates, e.g. "management.secondaryPathConfirmed". */
+  contextPath: string;
+}
+
+export interface PlanBlocker {
+  controlId: string;
+  reason: string;
+  preconditionIds: string[];
+}
+
+export type PlanCounts = Record<ControlEvaluationStatus, number>;
 
 export type PlanStatus =
   | "draft"
@@ -428,15 +596,22 @@ export type PlanStatus =
   | "failed"
   | "rolled-back";
 
-/** A hardening plan. Phase 1 only ever creates nothing; `draft` is reserved. */
+/** A hardening plan: evaluated controls plus everything needed for review. */
 export interface HardeningPlan {
   schemaVersion: number;
   planId: string;
   serverId: string;
   inventoryId: string;
-  createdAt: string;
+  /** Reference to the operational context revision used (updatedAt), if any. */
+  contextUpdatedAt: string | null;
+  generatedAt: string;
   profile: string;
-  controls: HardeningControl[];
+  catalogVersion: string;
+  controls: PlannedControl[];
+  counts: PlanCounts;
+  unresolvedQuestions: PlanningQuestion[];
+  blockers: PlanBlocker[];
+  warnings: string[];
   status: PlanStatus;
 }
 

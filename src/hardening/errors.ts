@@ -69,3 +69,10 @@ export class DiscoveryError extends HardeningError {
     super(message, options);
   }
 }
+
+/** Planning could not proceed (missing inventory, invalid context, ...). */
+export class PlanningError extends HardeningError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+  }
+}
