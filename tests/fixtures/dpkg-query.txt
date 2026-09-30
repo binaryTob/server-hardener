@@ -1,0 +1,5 @@
+accountsservice	23.13.9-2ubuntu6.1	amd64
+acl	2.3.2-1build1.1	amd64
+adduser	3.137ubuntu1	all
+curl	8.5.0-2ubuntu10	amd64
+openssh-server	1:9.6p1-3ubuntu13	amd64

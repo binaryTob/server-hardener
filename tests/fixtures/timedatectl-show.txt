@@ -1,0 +1,3 @@
+Timezone=America/Argentina/Buenos_Aires
+NTP=yes
+NTPSynchronized=yes

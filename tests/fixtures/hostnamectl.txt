@@ -1,0 +1,9 @@
+ Static hostname: srv-01
+       Icon name: computer-vm
+         Chassis: vm
+      Machine ID: a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6
+         Boot ID: 1111222233334444555566667777 8888
+Operating System: Ubuntu 24.04.2 LTS
+          Kernel: Linux 6.8.0-45-generic
+    Architecture: x86-64
+Virtualization: kvm

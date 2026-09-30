@@ -1,0 +1,5 @@
+Mounted on                Filesystem     Type        1B-blocks         Used        Avail Use%
+/run                      tmpfs          tmpfs      1643544576      4038656   1639505920   1%
+/                         /dev/sda2      ext4     501809635328 155774222336 320469610496  33%
+/dev/shm                  tmpfs          tmpfs      8217718784     18644992   8199073792   1%
+/boot/efi                 /dev/sda1      vfat         535799808     11829248    523970560   3%

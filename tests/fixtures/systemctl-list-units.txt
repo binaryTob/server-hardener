@@ -1,0 +1,9 @@
+accounts-daemon.service                    loaded    active   running Accounts Service
+cups.service                               loaded    active   running CUPS Scheduler
+ssh.service                                loaded    active   running OpenBSD Secure Shell server
+systemd-journald.service                   loaded    active   running Journal Service
+systemd-timesyncd.service                  loaded    active   running Network Time Synchronization
+unattended-upgrades.service                loaded    active   running Unattended Upgrades Shutdown
+alsa-restore.service                       loaded    inactive exited  Save/Restore Sound Card State
+nftables.service                           loaded    inactive dead    nftables
+ufw.service                                loaded    inactive exited  Uncomplicated firewall

@@ -1,0 +1,27 @@
+{
+  "blockdevices": [
+    {
+      "name": "sda",
+      "type": "disk",
+      "size": "20G",
+      "fstype": null,
+      "mountpoint": null,
+      "children": [
+        {
+          "name": "sda1",
+          "type": "part",
+          "size": "512M",
+          "fstype": "vfat",
+          "mountpoint": "/boot/efi"
+        },
+        {
+          "name": "sda2",
+          "type": "part",
+          "size": "19.5G",
+          "fstype": "ext4",
+          "mountpoint": "/"
+        }
+      ]
+    }
+  ]
+}

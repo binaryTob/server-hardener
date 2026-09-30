@@ -1,0 +1,9 @@
+accounts-daemon.service            enabled         enabled
+ssh.service                        enabled         enabled
+systemd-journald.service           static           -
+systemd-timesyncd.service          enabled         enabled
+nftables.service                   disabled        enabled
+ufw.service                        enabled          enabled
+alsa-restore.service               static          -
+wazuh-agent.service                not-found       -
+auditd.service                     not-found       -

@@ -1,0 +1,7 @@
+TARGET                    SOURCE        FSTYPE   OPTIONS
+/sys                      sysfs         sysfs    rw,nosuid,nodev,noexec,relatime
+/proc                     proc          proc     rw,nosuid,nodev,noexec,relatime
+/dev                      udev          devtmpfs rw,relatime,size=6982852k,nr_inodes=1745713
+/                         /dev/sda2     ext4     rw,relatime
+/boot/efi                 /dev/sda1     vfat     rw,relatime,fmask=0077,dmask=0077,codepage=437
+/var/lib/docker/overlay2  /dev/sda2     ext4     rw,relatime

@@ -1,0 +1,4 @@
+root:!:19700:0:99999:7:::
+daemon:*:19700:0:99999:7:::
+user:$6$rounds=4096$examplehash$fakehashvaluehere:19850:0:99999:7:::
+_xyzsvc:*:19700:0:99999:7:::
