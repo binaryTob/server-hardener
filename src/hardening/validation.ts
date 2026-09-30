@@ -10,7 +10,7 @@
  */
 import { z } from "zod";
 import { UnsupportedSchemaVersionError, ValidationFailureError } from "./errors";
-import { SCHEMA_VERSION, type ServerInventory } from "./models";
+import { type HardeningPlan, type OperationalContext, SCHEMA_VERSION, type ServerInventory } from "./models";
 
 const confidenceSchema = z.enum(["observed", "derived", "unknown"]);
 
@@ -326,42 +326,198 @@ export function checkSchemaVersion(input: unknown, expected: number = SCHEMA_VER
   return version;
 }
 
-// --- Future-phase document envelopes (contracts, not produced yet) ---------
+// --- Operational context (Phase 2) ----------------------------------------
 
-const controlSchema = z.object({
-  id: z.string().min(1),
-  title: z.string().min(1),
-  description: z.string(),
-  category: z.enum([
-    "os",
-    "network",
-    "services",
-    "users",
-    "authentication",
-    "logging",
-    "filesystem",
-    "packages",
-    "kernel",
-  ]),
+const environmentSchema = z.enum(["production", "staging", "development", "testing", "unknown"]);
+const criticalitySchema = z.enum(["low", "medium", "high", "critical", "unknown"]);
+const internetExposureSchema = z.enum(["direct", "indirect", "none", "unknown"]);
+const serverRoleSchema = z.enum([
+  "generic-server",
+  "web-server",
+  "application-server",
+  "database",
+  "container-host",
+  "kubernetes-node",
+  "bastion",
+  "monitoring",
+  "logging",
+  "file-server",
+  "directory-service",
+  "automation",
+  "unknown",
+]);
+const roleConfidenceSchema = z.enum(["confirmed", "derived"]);
+const roleAssignmentSchema = z.object({
+  role: serverRoleSchema,
+  confidence: roleConfidenceSchema,
+  source: z.string().min(1),
+});
+const managementMethodSchema = z.enum([
+  "ssh",
+  "ssh-via-bastion",
+  "vpn",
+  "console",
+  "serial-console",
+  "out-of-band",
+  "rdp",
+  "web-console",
+  "automation",
+  "other",
+]);
+const cidrSchema = z
+  .string()
+  .regex(/^[0-9a-fA-F:.]+\/[0-9]{1,3}$/, "expected CIDR notation, e.g. 10.0.0.0/8");
+
+export const operationalContextSchema = z
+  .object({
+    schemaVersion: z.literal(SCHEMA_VERSION),
+    serverId: z.string().min(1),
+    updatedAt: z.string().min(1),
+    environment: environmentSchema,
+    criticality: criticalitySchema,
+    internetExposure: internetExposureSchema,
+    roles: z.array(roleAssignmentSchema),
+    management: z.object({
+      methods: z.array(managementMethodSchema),
+      secondaryPathConfirmed: z.boolean().nullable(),
+      consoleAccess: z.boolean().nullable(),
+    }),
+    networks: z.object({
+      administrative: z.array(cidrSchema),
+      service: z.array(cidrSchema),
+    }),
+    reboot: z.object({
+      allowed: z.boolean().nullable(),
+      maintenanceWindowAvailable: z.boolean().nullable(),
+    }),
+    highAvailability: z.boolean().nullable(),
+    operatorNotes: z.string().nullable(),
+  })
+  .strict();
+
+export function validateOperationalContext(input: unknown): OperationalContext {
+  const result = operationalContextSchema.safeParse(input);
+  if (!result.success) {
+    throw new ValidationFailureError(
+      "OperationalContext failed schema validation",
+      result.error.issues.map((issue) => {
+        const path = issue.path.length > 0 ? issue.path.map(String).join(".") : "(root)";
+        return `${path}: ${issue.message}`;
+      }),
+    );
+  }
+  return result.data as OperationalContext;
+}
+
+// --- Plans (Phase 2) -------------------------------------------------------
+
+const riskLevelSchema = z.enum(["none", "low", "medium", "high", "critical", "unknown"]);
+const controlEvaluationStatusSchema = z.enum([
+  "compliant",
+  "non-compliant",
+  "not-applicable",
+  "unknown",
+  "requires-context",
+  "requires-review",
+  "blocked",
+  "unsupported",
+  "error",
+]);
+const applicabilityStatusSchema = z.enum([
+  "applicable",
+  "not-applicable",
+  "unknown",
+  "unsupported",
+  "requires-context",
+]);
+const controlCategorySchema = z.enum([
+  "identity",
+  "privileged-access",
+  "ssh",
+  "network",
+  "firewall",
+  "services",
+  "packages",
+  "filesystem",
+  "kernel",
+  "logging",
+  "auditing",
+  "time",
+  "containers",
+]);
+const planPhaseSchema = z.enum([
+  "prerequisites",
+  "foundational",
+  "logging-visibility",
+  "identity",
+  "services",
+  "network",
+  "access",
+  "disruptive",
+]);
+const evidenceRefSchema = z.object({
+  inventoryPath: z.string().min(1),
+  observed: z.string().nullable(),
+  note: z.string().optional(),
+});
+const applicabilityDecisionSchema = z.object({
+  status: applicabilityStatusSchema,
   rationale: z.string(),
-  severity: z.enum(["info", "low", "medium", "high", "critical"]),
-  applicability: z.object({
-    osFamilies: z.array(osFamilySchema),
-    requires: z.array(z.string()).optional(),
-  }),
+  evidence: z.array(evidenceRefSchema),
+  missingContext: z.array(z.string()),
+  confidence: confidenceSchema,
+});
+const preconditionSchema = z.object({
+  id: z.string().min(1),
+  description: z.string().min(1),
+  critical: z.boolean(),
+  status: z.enum(["satisfied", "unsatisfied", "unknown"]),
+  evidence: z.array(evidenceRefSchema),
+  missingContext: z.array(z.string()),
+  reason: z.string().nullable(),
+});
+const riskAssessmentSchema = z.object({
+  securityImpact: riskLevelSchema,
+  availabilityRisk: riskLevelSchema,
+  lockoutRisk: riskLevelSchema,
+  operationalComplexity: riskLevelSchema,
+  rationale: z.string(),
+});
+const plannedControlSchema = z.object({
+  controlId: z.string().min(1),
+  title: z.string().min(1),
+  category: controlCategorySchema,
+  phase: planPhaseSchema,
+  phaseIndex: z.number().int().nonnegative(),
+  order: z.number().int().positive(),
+  status: controlEvaluationStatusSchema,
   currentState: z.string().nullable(),
   desiredState: z.string(),
-  securityImpact: z.string(),
-  availabilityRisk: z.string(),
-  lockoutRisk: z.string(),
+  applicability: applicabilityDecisionSchema,
+  risk: riskAssessmentSchema,
+  preconditions: z.array(preconditionSchema),
+  blockers: z.array(z.string()),
+  missingContext: z.array(z.string()),
+  evidence: z.array(evidenceRefSchema),
   requiresApproval: z.boolean(),
   reversible: z.boolean(),
-  dependencies: z.array(z.string()),
-  evidenceReferences: z.array(z.string()),
-  references: z.array(z.string()),
   tags: z.array(z.string()),
 });
-
+const planningQuestionSchema = z.object({
+  id: z.string().min(1),
+  prompt: z.string().min(1),
+  reason: z.string().min(1),
+  affectedControls: z.array(z.string()),
+  type: z.enum(["boolean", "single-choice", "multi-choice", "text", "cidr-list"]),
+  options: z.array(z.string()).optional(),
+  contextPath: z.string().min(1),
+});
+const planBlockerSchema = z.object({
+  controlId: z.string().min(1),
+  reason: z.string().min(1),
+  preconditionIds: z.array(z.string()),
+});
+const planCountsSchema = z.record(controlEvaluationStatusSchema, z.number().int().nonnegative());
 const planStatusSchema = z.enum([
   "draft",
   "review",
@@ -377,11 +533,31 @@ export const hardeningPlanSchema = z.object({
   planId: z.string().min(1),
   serverId: z.string().min(1),
   inventoryId: z.string().min(1),
-  createdAt: z.string().min(1),
+  contextUpdatedAt: z.string().nullable(),
+  generatedAt: z.string().min(1),
   profile: z.string().min(1),
-  controls: z.array(controlSchema),
+  catalogVersion: z.string().min(1),
+  controls: z.array(plannedControlSchema),
+  counts: planCountsSchema,
+  unresolvedQuestions: z.array(planningQuestionSchema),
+  blockers: z.array(planBlockerSchema),
+  warnings: z.array(z.string()),
   status: planStatusSchema,
 });
+
+export function validateHardeningPlan(input: unknown): HardeningPlan {
+  const result = hardeningPlanSchema.safeParse(input);
+  if (!result.success) {
+    throw new ValidationFailureError(
+      "HardeningPlan failed schema validation",
+      result.error.issues.map((issue) => {
+        const path = issue.path.length > 0 ? issue.path.map(String).join(".") : "(root)";
+        return `${path}: ${issue.message}`;
+      }),
+    );
+  }
+  return result.data as HardeningPlan;
+}
 
 export const changeRecordSchema = z.object({
   schemaVersion: z.literal(SCHEMA_VERSION),
