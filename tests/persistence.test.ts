@@ -64,7 +64,7 @@ describe("save / load round trip", () => {
     const dir = resolveServerDir(root, inventory.serverId);
     const entries = (await readdir(dir)).sort();
     expect(entries).toEqual(
-      ["changes", "exceptions", "inventory.json", "plans", "rollbacks", "verification"].sort(),
+      ["backups", "changes", "exceptions", "inventory.json", "plans", "rollbacks", "verification"].sort(),
     );
   });
 
