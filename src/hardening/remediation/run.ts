@@ -147,7 +147,10 @@ export async function applyControl(request: ExecuteRequest): Promise<ExecutionOu
     );
   }
 
-  const connection = await request.host.verifyConnection();
+  // Lightweight connectivity gate before touching anything. A brand-new
+  // connection is only forced AFTER SSH/firewall changes (reconnect check in
+  // the agent), not here — servers may rate-limit fresh connections.
+  const connection = await request.host.run("true", []);
   if (connection.status !== "ok") {
     return refused(request, connectionMessage(connection));
   }

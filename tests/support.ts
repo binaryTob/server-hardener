@@ -230,8 +230,21 @@ export class FakeHost implements Host {
       this.files.delete(target);
       return Promise.resolve(ok(""));
     }
-    if (command === "mkdir" || command === "chmod" || command === "chown" || command === "true")
-      return Promise.resolve(ok(""));
+    if (command === "true") {
+      return Promise.resolve(
+        this.connectionOk
+          ? ok("")
+          : {
+              status: "error",
+              stdout: "",
+              stderr: "Host key verification failed.",
+              exitCode: 255,
+              notRun: false,
+              failureKind: "host-key",
+            },
+      );
+    }
+    if (command === "mkdir" || command === "chmod" || command === "chown") return Promise.resolve(ok(""));
     if (command === "id") return Promise.resolve(ok("0"));
     if (command === "sudo") return Promise.resolve(ok(""));
     if (command === "printenv") return Promise.resolve(ok("/root"));
