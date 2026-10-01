@@ -26,6 +26,8 @@ export interface CommandOutcome {
   exitCode: number | null;
   /** True when the command never ran (missing binary / denied). */
   notRun: boolean;
+  /** Transport-specific failure label (e.g. ssh: "host-key", "auth"). */
+  failureKind?: string;
 }
 
 export interface CommandRunner {

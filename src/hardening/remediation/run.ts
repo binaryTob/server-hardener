@@ -1,14 +1,15 @@
 /**
- * Remediation orchestrator: preview / apply / verify / rollback for the local
- * host. Enforces the safety gates in one place:
+ * Remediation orchestrator over a target Host.
+ *
+ * Enforces the safety gates in one place:
+ * - the target connection is verified before any change;
  * - only controls the assessment marked `non-compliant` or `requires-review`;
  * - manual-only controls never apply;
- * - root is required where the change needs it (no sudo escalation);
- * - every apply/rollback is verified and recorded in `.server-hardener/last-run.json`.
+ * - root/sudo is required where the change needs it (no password handling);
+ * - backups are taken ON THE TARGET and every change is verified and recorded
+ *   in `.server-hardener/last-run.json`.
  */
-
-import { AssessmentError } from "../errors";
-import { type CommandRunner, ExecCommandRunner } from "../exec";
+import type { CommandOutcome, CommandRunner } from "../exec";
 import type {
   EvaluatedControl,
   LastRunEntry,
@@ -16,7 +17,8 @@ import type {
   ServerInventory,
   VerificationResult,
 } from "../models";
-import { appendLastRun, readLastRun } from "../store";
+import { appendLastRun, newRunId, readLastRun } from "../store";
+import type { Host } from "../transport/host";
 import { getRemediation } from "./registry";
 import {
   type AppliedChange,
@@ -28,16 +30,19 @@ import {
 } from "./types";
 
 const APPLICABLE_STATUSES = new Set(["non-compliant", "requires-review"]);
+const BACKUP_BASE = "/var/backups/server-hardener";
 
 export interface ExecuteRequest {
   storeRoot: string;
+  host: Host;
   inventory: ServerInventory;
   context: OperationalContext;
   control: EvaluatedControl;
+  targetHost: string;
   target?: string;
-  runner?: CommandRunner;
   paths?: SystemPaths;
   hasRoot?: boolean;
+  sudo?: boolean;
   now?: () => string;
 }
 
@@ -52,27 +57,65 @@ export interface ExecutionOutcome {
   preview: RemediationPreview | null;
 }
 
-function isRoot(): boolean {
-  return typeof process.getuid === "function" && process.getuid() === 0;
+async function ensureBackupDir(
+  host: Host,
+  runId: string,
+  hasRoot: boolean,
+  sudo: boolean,
+): Promise<string | null> {
+  if (hasRoot || sudo) {
+    const dir = `${BACKUP_BASE}/${runId}`;
+    const outcome = await host.exec("mkdir", ["-p", "--", dir], { sudo: !hasRoot });
+    if (outcome.status === "ok") return dir;
+  }
+  const home = await host.homeDir();
+  if (home) {
+    const dir = `${home}/.server-hardener-backups/${runId}`;
+    const outcome = await host.exec("mkdir", ["-p", "--", dir]);
+    if (outcome.status === "ok") return dir;
+  }
+  return null;
 }
 
-function buildContext(request: ExecuteRequest): RemediationContext {
+async function buildContext(request: ExecuteRequest, runId: string): Promise<RemediationContext> {
+  const hasRoot = request.hasRoot ?? false;
+  const sudo = request.sudo ?? false;
+  const backupDir = await ensureBackupDir(request.host, runId, hasRoot, sudo);
+  const privileged: CommandRunner = { run: (command, args) => request.host.runPrivileged(command, args) };
   const context: RemediationContext = {
+    host: request.host,
+    runner: privileged,
     inventory: request.inventory,
     context: request.context,
     control: request.control,
-    storeRoot: request.storeRoot,
-    runner: request.runner ?? new ExecCommandRunner({ timeoutMs: 120_000, maxOutputBytes: 4 * 1024 * 1024 }),
     paths: request.paths ?? defaultSystemPaths(),
-    hasRoot: request.hasRoot ?? isRoot(),
+    runId,
+    backupDir,
+    hasRoot,
+    sudo,
     now: request.now ?? (() => new Date().toISOString()),
   };
   if (request.target !== undefined) context.target = request.target;
   return context;
 }
 
+function connectionMessage(outcome: CommandOutcome): string {
+  switch (outcome.failureKind) {
+    case "host-key":
+      return "SSH host key verification failed. Add the host to known_hosts (or verify the fingerprint) before continuing.";
+    case "auth":
+      return "SSH authentication failed. Check your ssh config, agent and keys.";
+    case "connection":
+      return "SSH connection failed (host unreachable/refused/timed out).";
+    case "timeout":
+      return "SSH connection timed out.";
+    default:
+      return `SSH connection failed: ${outcome.stderr.trim() || outcome.status}`;
+  }
+}
+
 export async function previewControl(request: ExecuteRequest): Promise<ExecutionOutcome> {
-  const ctx = buildContext(request);
+  const ctx = await buildContext(request, "preview");
   const preview = await getRemediation(ctx.control.controlId).preview(ctx);
   return {
     action: "preview",
@@ -87,28 +130,31 @@ export async function previewControl(request: ExecuteRequest): Promise<Execution
 }
 
 export async function applyControl(request: ExecuteRequest): Promise<ExecutionOutcome> {
-  const ctx = buildContext(request);
-  const remediation = getRemediation(ctx.control.controlId);
-
+  const remediation = getRemediation(request.control.controlId);
   if (remediation.manual) {
-    return refused(ctx, `manual remediation required: ${remediation.manualReason}`);
+    return refused(request, `manual remediation required: ${remediation.manualReason}`);
   }
-  if (!APPLICABLE_STATUSES.has(ctx.control.status)) {
+  if (!APPLICABLE_STATUSES.has(request.control.status)) {
     return refused(
-      ctx,
-      `refusing to apply ${ctx.control.controlId}: status is "${ctx.control.status}" (only non-compliant or requires-review can be applied)`,
+      request,
+      `refusing to apply ${request.control.controlId}: status is "${request.control.status}" (only non-compliant or requires-review can be applied)`,
     );
   }
-  if (remediation.requiresRoot && !ctx.hasRoot) {
+  if (remediation.requiresRoot && !(request.hasRoot || request.sudo)) {
     return refused(
-      ctx,
-      "this change needs administrative privileges. Run OpenCode with the appropriate privileges (no sudo escalation is performed).",
+      request,
+      "this change needs administrative privileges on the target. Connect as root or ensure passwordless sudo (sudo -n) is available; no password is handled.",
     );
   }
 
+  const connection = await request.host.verifyConnection();
+  if (connection.status !== "ok") {
+    return refused(request, connectionMessage(connection));
+  }
+
+  const ctx = await buildContext(request, newRunId());
   const result = await remediation.apply(ctx);
-  await record(ctx, "apply", result);
-
+  await record(request, "apply", result, ctx);
   return {
     action: "apply",
     controlId: ctx.control.controlId,
@@ -122,7 +168,7 @@ export async function applyControl(request: ExecuteRequest): Promise<ExecutionOu
 }
 
 export async function verifyControl(request: ExecuteRequest): Promise<ExecutionOutcome> {
-  const ctx = buildContext(request);
+  const ctx = await buildContext(request, "verify");
   const verification = await getRemediation(ctx.control.controlId).verify(ctx);
   return {
     action: "verify",
@@ -137,26 +183,26 @@ export async function verifyControl(request: ExecuteRequest): Promise<ExecutionO
 }
 
 export async function rollbackControl(request: ExecuteRequest): Promise<ExecutionOutcome> {
-  const ctx = buildContext(request);
-  const remediation = getRemediation(ctx.control.controlId);
-  const previous = await lastAppliedChange(ctx.storeRoot, ctx.control.controlId);
-  if (!previous) {
-    return refused(ctx, `no applied change found for ${ctx.control.controlId}`);
-  }
-  if (remediation.manual) {
-    return refused(ctx, `manual rollback required: ${remediation.manualReason}`);
-  }
-  if (remediation.requiresRoot && !ctx.hasRoot) {
-    return refused(ctx, "rollback needs administrative privileges.");
+  const remediation = getRemediation(request.control.controlId);
+  const previous = await lastAppliedChange(request.storeRoot, request.targetHost, request.control.controlId);
+  if (!previous)
+    return refused(
+      request,
+      `no applied change found for ${request.control.controlId} on ${request.targetHost}`,
+    );
+  if (remediation.manual) return refused(request, `manual rollback required: ${remediation.manualReason}`);
+  if (remediation.requiresRoot && !(request.hasRoot || request.sudo)) {
+    return refused(request, "rollback needs administrative privileges on the target.");
   }
 
+  const ctx = await buildContext(request, previous.runId);
   let result: RemediationApplyResult;
   try {
     result = await remediation.rollback(ctx, previous.change);
   } catch (err) {
-    return refused(ctx, `rollback failed: ${err instanceof Error ? err.message : String(err)}`);
+    return refused(request, `rollback failed: ${err instanceof Error ? err.message : String(err)}`);
   }
-  await record(ctx, "rollback", result);
+  await record(request, "rollback", result, ctx);
   return {
     action: "rollback",
     controlId: ctx.control.controlId,
@@ -171,11 +217,14 @@ export async function rollbackControl(request: ExecuteRequest): Promise<Executio
 
 async function lastAppliedChange(
   storeRoot: string,
+  targetHost: string,
   controlId: string,
-): Promise<{ change: AppliedChange } | null> {
+): Promise<{ change: AppliedChange; runId: string } | null> {
   const run = await readLastRun(storeRoot);
   if (!run) return null;
-  const entry = [...run.entries].reverse().find((e) => e.controlId === controlId && e.action === "apply");
+  const entry = [...run.entries]
+    .reverse()
+    .find((e) => e.controlId === controlId && e.host === targetHost && e.action === "apply");
   if (!entry || entry.result === "manual") return null;
   return {
     change: {
@@ -185,16 +234,19 @@ async function lastAppliedChange(
       after: entry.after,
       backupIds: entry.backupIds,
     },
+    runId: entry.backupDir ? (entry.backupDir.split("/").at(-1) ?? "restore") : "restore",
   };
 }
 
 async function record(
-  ctx: RemediationContext,
+  request: ExecuteRequest,
   action: "apply" | "rollback",
   result: RemediationApplyResult,
+  ctx: RemediationContext,
 ): Promise<void> {
   const entry: LastRunEntry = {
     at: ctx.now(),
+    host: request.targetHost,
     controlId: ctx.control.controlId,
     action,
     target: result.target,
@@ -203,6 +255,7 @@ async function record(
     message: result.message,
     before: result.before,
     after: result.after,
+    backupDir: ctx.backupDir,
     verification: result.verification
       ? {
           check: result.verification.check,
@@ -213,8 +266,8 @@ async function record(
       : null,
     backupIds: result.backupIds,
   };
-  await appendLastRun(ctx.storeRoot, entry, {
-    hostname: ctx.inventory.identity.data?.hostname ?? null,
+  await appendLastRun(request.storeRoot, entry, {
+    hostname: request.inventory.identity.data?.hostname ?? null,
     evaluated: 1,
   });
 }
@@ -226,11 +279,10 @@ function entryResult(action: "apply" | "rollback", result: RemediationApplyResul
   return "failed";
 }
 
-function refused(ctx: RemediationContext, message: string): ExecutionOutcome {
-  void ctx;
+function refused(request: ExecuteRequest, message: string): ExecutionOutcome {
   return {
     action: "apply",
-    controlId: ctx.control.controlId,
+    controlId: request.control.controlId,
     applied: false,
     changed: false,
     message,
@@ -238,10 +290,4 @@ function refused(ctx: RemediationContext, message: string): ExecutionOutcome {
     backupIds: [],
     preview: null,
   };
-}
-
-/** Ensure a control id is part of the catalog (guards tool inputs). */
-export function assertKnownControl(control: EvaluatedControl | undefined): EvaluatedControl {
-  if (!control) throw new AssessmentError("unknown control");
-  return control;
 }

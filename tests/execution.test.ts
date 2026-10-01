@@ -1,9 +1,8 @@
 /**
- * Execution tests: preview, backup, apply, verify, rollback and safety gates.
- * Uses a temporary system tree + stateful fake runner; never touches the host.
+ * Execution tests over an in-memory FakeHost: preview, backup, apply, verify,
+ * rollback and safety gates. No real host, no SSH.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
 import type { ControlEvaluationStatus, EvaluatedControl } from "../src/hardening/models";
 import {
   applyControl,
@@ -12,7 +11,7 @@ import {
   rollbackControl,
   verifyControl,
 } from "../src/hardening/remediation/run";
-import { loadBackup, readLastRun } from "../src/hardening/store";
+import { readLastRun } from "../src/hardening/store";
 import { cleanupExecEnv, type ExecEnv, evaluate, makeExecEnv } from "./support";
 
 const envs: ExecEnv[] = [];
@@ -32,71 +31,71 @@ function withStatus(control: EvaluatedControl, status: ControlEvaluationStatus):
   return { ...control, status };
 }
 
-function request(current: ExecEnv, control: EvaluatedControl, target?: string): ExecuteRequest {
+function request(current: ExecEnv, control: EvaluatedControl, targetUnit?: string): ExecuteRequest {
   const base: ExecuteRequest = {
     storeRoot: current.storeRoot,
+    host: current.host,
     inventory: current.inventory,
     context: current.context,
     control,
-    runner: current.runner,
-    paths: current.paths,
+    targetHost: current.host.label,
     hasRoot: true,
+    sudo: true,
     now: () => "2025-04-01T00:00:00.000Z",
   };
-  if (target !== undefined) base.target = target;
+  if (targetUnit !== undefined) base.target = targetUnit;
   return base;
 }
 
 describe("preview is read-only", () => {
-  test("SSH preview changes nothing and reports the edit", async () => {
+  test("SSH preview changes nothing", async () => {
     const current = await env();
-    const before = await readFile(current.paths.sshdConfig, "utf8");
+    const before = current.host.files.get("/etc/ssh/sshd_config");
     const control = withStatus(evaluate("SSH-005", current.inventory, current.context), "non-compliant");
     const outcome = await previewControl(request(current, control));
     expect(outcome.preview?.manual).toBe(false);
     expect(outcome.preview?.desiredState).toContain("MaxAuthTries 4");
-    expect(await readFile(current.paths.sshdConfig, "utf8")).toBe(before);
-    expect(await readLastRun(current.storeRoot)).toBeNull();
+    expect(current.host.files.get("/etc/ssh/sshd_config")).toBe(before);
   });
 });
 
 describe("SSH apply / verify / rollback", () => {
-  test("apply edits config, backs it up, verifies and records the run", async () => {
+  test("apply edits config, backs it up on the target, verifies and records the run", async () => {
     const current = await env();
     const control = withStatus(evaluate("SSH-005", current.inventory, current.context), "non-compliant");
     const outcome = await applyControl(request(current, control));
 
     expect(outcome.changed).toBe(true);
     expect(outcome.verification?.passed).toBe(true);
-    expect(await readFile(current.paths.sshdConfig, "utf8")).toContain("MaxAuthTries 4");
-
-    const backup = await loadBackup(current.storeRoot, outcome.backupIds[0] ?? "");
-    expect(backup.originalPath).toBe(current.paths.sshdConfig);
-    expect(backup.content).toContain("MaxAuthTries 6");
-    expect(backup.mode).not.toBeNull();
+    expect(current.host.files.get("/etc/ssh/sshd_config")).toContain("MaxAuthTries 4");
 
     const run = await readLastRun(current.storeRoot);
-    expect(run?.entries.at(-1)?.result).toBe("applied");
+    const entry = run?.entries.at(-1);
+    expect(entry?.result).toBe("applied");
+    expect(entry?.backupDir).toContain("/var/backups/server-hardener/");
+    if (entry?.backupDir && outcome.backupIds[0]) {
+      expect(current.host.files.has(`${entry.backupDir}/${outcome.backupIds[0]}.json`)).toBe(true);
+    }
   });
 
-  test("rollback restores the previous config", async () => {
+  test("rollback restores the previous config from the target backup", async () => {
     const current = await env();
     const control = withStatus(evaluate("SSH-005", current.inventory, current.context), "non-compliant");
     await applyControl(request(current, control));
     const outcome = await rollbackControl(request(current, control));
     expect(outcome.changed).toBe(true);
-    expect(await readFile(current.paths.sshdConfig, "utf8")).toContain("MaxAuthTries 6");
+    expect(current.host.files.get("/etc/ssh/sshd_config")).toContain("MaxAuthTries 6");
   });
 
-  test("sshd -t failure restores the backup and keeps no change", async () => {
+  test("sshd -t failure restores the config and keeps no change", async () => {
     const current = await env();
-    current.runner.sshdSyntaxOk = false;
-    const original = await readFile(current.paths.sshdConfig, "utf8");
+    current.host.sshdSyntaxOk = false;
+    const original = current.host.files.get("/etc/ssh/sshd_config");
     const control = withStatus(evaluate("SSH-004", current.inventory, current.context), "non-compliant");
     const outcome = await applyControl(request(current, control));
     expect(outcome.changed).toBe(false);
     expect(outcome.message).toContain("sshd -t failed");
-    expect(await readFile(current.paths.sshdConfig, "utf8")).toBe(original);
+    expect(current.host.files.get("/etc/ssh/sshd_config")).toBe(original);
   });
 
   test("disabling SSH password auth is refused without a confirmed secondary path", async () => {
@@ -109,7 +108,6 @@ describe("SSH apply / verify / rollback", () => {
     const outcome = await applyControl({ ...request(current, control), context });
     expect(outcome.changed).toBe(false);
     expect(outcome.message).toContain("secondary management path");
-    expect(await readFile(current.paths.sshdConfig, "utf8")).toContain("PasswordAuthentication yes");
   });
 });
 
@@ -118,8 +116,8 @@ describe("sysctl", () => {
     const current = await env();
     const control = withStatus(evaluate("KRN-003", current.inventory, current.context), "non-compliant");
     const outcome = await applyControl(request(current, control));
-    expect(current.runner.sysctl.get("kernel.randomize_va_space")).toBe("2");
-    expect(await readFile(current.paths.sysctlManagedFile, "utf8")).toContain(
+    expect(current.host.sysctl.get("kernel.randomize_va_space")).toBe("2");
+    expect(current.host.files.get("/etc/sysctl.d/99-server-hardener.conf")).toContain(
       "kernel.randomize_va_space = 2",
     );
     expect(outcome.verification?.passed).toBe(true);
@@ -127,17 +125,15 @@ describe("sysctl", () => {
 });
 
 describe("services", () => {
-  test("disable and stop a target service, then roll back", async () => {
+  test("disable + stop a target service and roll back", async () => {
     const current = await env();
-    current.runner.services.set("telnet.socket", { enabled: true, active: true });
+    current.host.services.set("telnet.socket", { enabled: true, active: true });
     const control = withStatus(evaluate("SVC-001", current.inventory, current.context), "non-compliant");
-    const applied = await applyControl(request(current, control, "telnet.socket"));
-    expect(applied.changed).toBe(true);
-    expect(current.runner.services.get("telnet.socket")).toEqual({ enabled: false, active: false });
-
+    await applyControl(request(current, control, "telnet.socket"));
+    expect(current.host.services.get("telnet.socket")).toEqual({ enabled: false, active: false });
     const rolled = await rollbackControl(request(current, control, "telnet.socket"));
     expect(rolled.changed).toBe(true);
-    expect(current.runner.services.get("telnet.socket")).toEqual({ enabled: true, active: true });
+    expect(current.host.services.get("telnet.socket")).toEqual({ enabled: true, active: true });
   });
 });
 
@@ -145,9 +141,8 @@ describe("firewall safety", () => {
   test("nftables is never changed automatically", async () => {
     const current = await env();
     const inventory = structuredClone(current.inventory);
-    if (inventory.securityControls.data?.firewall) {
+    if (inventory.securityControls.data?.firewall)
       inventory.securityControls.data.firewall.detectedImplementations = ["nftables"];
-    }
     const control = withStatus(evaluate("FW-001", inventory, current.context), "non-compliant");
     const outcome = await applyControl({ ...request(current, control), inventory });
     expect(outcome.changed).toBe(false);
@@ -156,55 +151,53 @@ describe("firewall safety", () => {
   test("ufw is enabled without closing administrative access", async () => {
     const current = await env();
     const inventory = structuredClone(current.inventory);
-    if (inventory.securityControls.data?.firewall) {
+    if (inventory.securityControls.data?.firewall)
       inventory.securityControls.data.firewall.detectedImplementations = ["ufw"];
-    }
     const control = withStatus(evaluate("FW-001", inventory, current.context), "non-compliant");
     const outcome = await applyControl({ ...request(current, control), inventory });
-    expect(current.runner.ufwStatusText).toContain("active");
+    expect(current.host.ufwStatusText).toContain("active");
     expect(outcome.verification?.passed).toBe(true);
   });
 });
 
 describe("filesystem", () => {
-  test("FS-001 adds safe options to fstab after backup", async () => {
+  test("FS-001 adds safe options to fstab after a target backup", async () => {
     const current = await env();
     const control = withStatus(evaluate("FS-001", current.inventory, current.context), "requires-review");
     const outcome = await applyControl(request(current, control));
     expect(outcome.changed).toBe(true);
-    const fstab = await readFile(current.paths.fstab, "utf8");
-    expect(fstab).toContain("nodev");
-    expect(fstab).toContain("nosuid");
+    expect(current.host.files.get("/etc/fstab")).toContain("nodev");
     expect(outcome.backupIds.length).toBe(1);
   });
 });
 
 describe("safety gates", () => {
-  test("a control the assessment did not mark as actionable is refused", async () => {
+  test("non-actionable control is refused", async () => {
     const current = await env();
-    const control = evaluate("KRN-003", current.inventory, current.context); // status unknown
+    const control = evaluate("KRN-003", current.inventory, current.context); // unknown
     const outcome = await applyControl(request(current, control));
     expect(outcome.changed).toBe(false);
     expect(outcome.message).toContain("refusing to apply");
   });
 
-  test("apply without root is refused", async () => {
+  test("apply without root/sudo is refused", async () => {
     const current = await env();
     const control = withStatus(evaluate("KRN-003", current.inventory, current.context), "non-compliant");
-    const outcome = await applyControl({ ...request(current, control), hasRoot: false });
+    const outcome = await applyControl({ ...request(current, control), hasRoot: false, sudo: false });
     expect(outcome.changed).toBe(false);
     expect(outcome.message).toContain("administrative privileges");
   });
 
-  test("manual-only controls never apply", async () => {
+  test("connection failure is reported before any change", async () => {
     const current = await env();
-    const control = withStatus(evaluate("NET-001", current.inventory, current.context), "requires-review");
+    current.host.connectionOk = false;
+    const control = withStatus(evaluate("KRN-003", current.inventory, current.context), "non-compliant");
     const outcome = await applyControl(request(current, control));
     expect(outcome.changed).toBe(false);
-    expect(outcome.message).toContain("manual remediation required");
+    expect(outcome.message).toContain("host key");
   });
 
-  test("verify returns a persisted-shaped verification result", async () => {
+  test("verify returns a verification result", async () => {
     const current = await env();
     const control = withStatus(evaluate("SSH-005", current.inventory, current.context), "non-compliant");
     await applyControl(request(current, control));

@@ -8,7 +8,7 @@
 import type { VerificationResult } from "../models";
 import { newVerificationId } from "../store";
 import { readFstabOptions, setFstabOptions } from "./config";
-import { createBackup, readTextOrNull, restoreBackup, writeTextAtomic } from "./fsops";
+import { createBackup, readConfig, restoreBackup, writeConfig } from "./fsops";
 import type {
   AppliedChange,
   Remediation,
@@ -30,7 +30,7 @@ function spec(ctx: RemediationContext): { mountpoint: string; options: string[] 
 
 async function preview(ctx: RemediationContext): Promise<RemediationPreview> {
   const current = spec(ctx);
-  const text = await readTextOrNull(ctx.paths.fstab);
+  const text = await readConfig(ctx, ctx.paths.fstab);
   const options = text ? readFstabOptions(text, current.mountpoint) : null;
   if (options === null) {
     return {
@@ -71,7 +71,7 @@ async function preview(ctx: RemediationContext): Promise<RemediationPreview> {
 
 async function verify(ctx: RemediationContext): Promise<VerificationResult> {
   const current = spec(ctx);
-  const text = await readTextOrNull(ctx.paths.fstab);
+  const text = await readConfig(ctx, ctx.paths.fstab);
   const options = text ? readFstabOptions(text, current.mountpoint) : null;
   const missing = current.options.filter((o) => !(options ?? []).includes(o));
   const passed = options !== null && missing.length === 0;
@@ -90,7 +90,7 @@ async function verify(ctx: RemediationContext): Promise<VerificationResult> {
 
 async function apply(ctx: RemediationContext): Promise<RemediationApplyResult> {
   const current = spec(ctx);
-  const text = await readTextOrNull(ctx.paths.fstab);
+  const text = await readConfig(ctx, ctx.paths.fstab);
   if (text === null) {
     return refused(ctx, `${ctx.paths.fstab} is not readable`);
   }
@@ -99,7 +99,7 @@ async function apply(ctx: RemediationContext): Promise<RemediationApplyResult> {
   }
   const backup = await createBackup(ctx, ctx.paths.fstab);
   const { content, previousOptions, changed } = setFstabOptions(text, current.mountpoint, current.options);
-  if (changed) await writeTextAtomic(ctx.paths.fstab, content);
+  if (changed) await writeConfig(ctx, ctx.paths.fstab, content);
   return {
     changed,
     target: ctx.paths.fstab,
@@ -129,7 +129,7 @@ function desiredOptions(previous: string[] | null, add: string[]): string[] {
 async function rollback(ctx: RemediationContext, change: AppliedChange): Promise<RemediationApplyResult> {
   const before = JSON.parse(change.before ?? "{}") as { backupId?: string };
   if (!before.backupId) return refused(ctx, "no fstab backup recorded; manual rollback required");
-  await restoreBackup(ctx.storeRoot, before.backupId);
+  await restoreBackup(ctx, before.backupId);
   return {
     changed: true,
     target: ctx.paths.fstab,

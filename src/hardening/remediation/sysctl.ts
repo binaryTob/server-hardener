@@ -9,7 +9,7 @@
 import type { VerificationResult } from "../models";
 import { newVerificationId } from "../store";
 import { buildManagedSysctlFile, removeManagedSysctlBlock, type SysctlEntry } from "./config";
-import { createBackup, deleteFile, listDir, readTextOrNull, restoreBackup, writeTextAtomic } from "./fsops";
+import { createBackup, deleteConfig, listDir, readConfig, restoreBackup, writeConfig } from "./fsops";
 import type {
   AppliedChange,
   Remediation,
@@ -59,14 +59,14 @@ async function findConflicts(
 ): Promise<{ file: string; key: string; value: string }[]> {
   const conflicts: { file: string; key: string; value: string }[] = [];
   const candidates: string[] = ["/etc/sysctl.conf"];
-  for (const name of await listDir(ctx.paths.sysctlConfDir)) {
+  for (const name of await listDir(ctx, ctx.paths.sysctlConfDir)) {
     if (!name.endsWith(".conf")) continue;
     const full = `${ctx.paths.sysctlConfDir.replace(/\/$/, "")}/${name}`;
     if (full === ctx.paths.sysctlManagedFile) continue;
     candidates.push(full);
   }
   for (const file of candidates) {
-    const text = await readTextOrNull(file);
+    const text = await readConfig(ctx, file);
     if (!text) continue;
     for (const line of text.split("\n")) {
       const trimmed = line.trim();
@@ -163,14 +163,14 @@ async function apply(ctx: RemediationContext): Promise<RemediationApplyResult> {
 
   for (const entry of spec.entries) before[entry.key] = await readSysctl(ctx, entry.key);
 
-  const existingManaged = await readTextOrNull(ctx.paths.sysctlManagedFile);
+  const existingManaged = await readConfig(ctx, ctx.paths.sysctlManagedFile);
   let backupId: string | null = null;
   if (existingManaged !== null) {
     backupId = (await createBackup(ctx, ctx.paths.sysctlManagedFile)).backupId;
     backupIds.push(backupId);
   }
   const content = buildManagedSysctlFile(existingManaged, spec.entries);
-  await writeTextAtomic(ctx.paths.sysctlManagedFile, content);
+  await writeConfig(ctx, ctx.paths.sysctlManagedFile, content);
 
   let allOk = true;
   for (const entry of spec.entries) {
@@ -206,12 +206,12 @@ async function rollback(ctx: RemediationContext, change: AppliedChange): Promise
     managedFileBackupId?: string | null;
   };
   if (before.managedFileBackupId) {
-    await restoreBackup(ctx.storeRoot, before.managedFileBackupId);
+    await restoreBackup(ctx, before.managedFileBackupId);
   } else {
-    const existing = await readTextOrNull(ctx.paths.sysctlManagedFile);
+    const existing = await readConfig(ctx, ctx.paths.sysctlManagedFile);
     const { content } = removeManagedSysctlBlock(existing);
-    if (content === null) await deleteFile(ctx.paths.sysctlManagedFile);
-    else await writeTextAtomic(ctx.paths.sysctlManagedFile, content);
+    if (content === null) await deleteConfig(ctx, ctx.paths.sysctlManagedFile);
+    else await writeConfig(ctx, ctx.paths.sysctlManagedFile, content);
   }
   for (const [key, value] of Object.entries(before.values ?? {})) {
     if (value !== null) await ctx.runner.run("sysctl", ["-w", `${key}=${value}`]);

@@ -14,7 +14,7 @@ import type { PreconditionCheck, PreconditionSpec } from "../controls/types";
 import type { VerificationResult } from "../models";
 import { newVerificationId } from "../store";
 import { readDirective, upsertDirective } from "./config";
-import { createBackup, readTextOrNull, restoreBackup, writeTextAtomic } from "./fsops";
+import { createBackup, readConfig, restoreBackup, writeConfig } from "./fsops";
 import type {
   AppliedChange,
   Remediation,
@@ -65,7 +65,7 @@ async function effectiveDirective(ctx: RemediationContext, key: string): Promise
     const match = new RegExp(`^\\s*${key}\\s+(\\S+)`, "im").exec(outcome.stdout);
     if (match) return match[1] ?? null;
   }
-  const text = await readTextOrNull(ctx.paths.sshdConfig);
+  const text = await readConfig(ctx, ctx.paths.sshdConfig);
   return text ? readDirective(text, key) : null;
 }
 
@@ -86,7 +86,7 @@ function unsafeReason(ctx: RemediationContext): string | null {
 
 async function preview(ctx: RemediationContext): Promise<RemediationPreview> {
   const current = spec(ctx);
-  const fileText = await readTextOrNull(ctx.paths.sshdConfig);
+  const fileText = await readConfig(ctx, ctx.paths.sshdConfig);
   const observed = await effectiveDirective(ctx, current.key);
   const warnings: string[] = [];
   if (current.lockout) {
@@ -172,17 +172,17 @@ async function apply(ctx: RemediationContext): Promise<RemediationApplyResult> {
   if (unsafe) {
     return refused(ctx, unsafe);
   }
-  const original = await readTextOrNull(ctx.paths.sshdConfig);
+  const original = await readConfig(ctx, ctx.paths.sshdConfig);
   if (original === null) {
     return refused(ctx, `${ctx.paths.sshdConfig} is not readable`);
   }
   const backup = await createBackup(ctx, ctx.paths.sshdConfig);
   const { content, previous, changed } = upsertDirective(original, current.key, current.value);
-  await writeTextAtomic(ctx.paths.sshdConfig, content);
+  await writeConfig(ctx, ctx.paths.sshdConfig, content);
 
   const syntax = await ctx.runner.run("sshd", ["-t"]);
   if (syntax.status !== "ok") {
-    await writeTextAtomic(ctx.paths.sshdConfig, original);
+    await writeConfig(ctx, ctx.paths.sshdConfig, original);
     const verification = await verify(ctx);
     return {
       changed: false,
@@ -225,7 +225,7 @@ async function reloadSsh(ctx: RemediationContext): Promise<{ ok: boolean; detail
 async function rollback(ctx: RemediationContext, change: AppliedChange): Promise<RemediationApplyResult> {
   const before = JSON.parse(change.before ?? "{}") as { backupId?: string };
   if (!before.backupId) return refused(ctx, "no SSH backup recorded; manual rollback required");
-  await restoreBackup(ctx.storeRoot, before.backupId);
+  await restoreBackup(ctx, before.backupId);
   const syntax = await ctx.runner.run("sshd", ["-t"]);
   if (syntax.status === "ok") await reloadSsh(ctx);
   const verification = await verify(ctx);

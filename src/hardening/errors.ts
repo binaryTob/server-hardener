@@ -60,3 +60,24 @@ export class AssessmentError extends HardeningError {
     super(message, options);
   }
 }
+
+/** A target string is malformed or could enable command/option injection. */
+export class TargetValidationError extends HardeningError {
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/** A remote transport operation failed (connection, auth, host key, timeout). */
+export class TransportError extends HardeningError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+  }
+}
+
+/** No target selected for the session and none was provided. */
+export class NoTargetError extends HardeningError {
+  constructor(message = "No target selected. Connect to a server first.") {
+    super(message);
+  }
+}

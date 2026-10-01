@@ -1,112 +1,107 @@
 # server-hardener
 
-Agente **local** de OpenCode para hardenizar el servidor Linux donde corre.
-No administra servidores remotos, no maneja flotas, no es un daemon ni una
-plataforma.
+Agente **de OpenCode que corre en tu workstation** y administra **un servidor
+Linux objetivo por SSH**. El servidor objetivo no necesita nada instalado: ni
+OpenCode, ni Bun, ni Node, ni el repo, ni API keys, ni un agente.
 
 ```text
-ssh servidor
 git clone <repo> server-hardener && cd server-hardener
 bun install
 opencode
-> Hardenizá este servidor.
+> Hardenizá admin@server.example
 ```
 
-El agente inspecciona el host local, propone cambios agrupados por riesgo,
-pregunta solo lo necesario, aplica los aprobados y verifica cada uno. Podés
-revertir si algo falla.
+```text
+Workstation (OpenCode + server-hardener)  ── SSH ──▶  Servidor objetivo (sshd)
+```
+
+SSH es solo el transporte de las tools. No es fleet management ni multi-servidor.
 
 ## Requisitos
 
-- [Bun](https://bun.sh) ≥ 1.4 en el propio servidor.
-- Linux (target del agente).
+- [Bun](https://bun.sh) ≥ 1.4 **en la workstation**.
+- Acceso SSH al target (alias de `~/.ssh/config`, `user@host` o `user@IP`),
+  con ssh-agent/claves y `known_hosts` configurados normalmente.
+- En el target: root por SSH o un usuario admin con `sudo -n` sin password.
 
 ## Uso
+
+Desde la workstation:
+
+```text
+opencode
+```
+
+Luego:
+
+```text
+> Hardenizá db.example
+> Hardenizá admin@192.0.2.10
+> Hardenizá root@server.example
+```
+
+El agente:
+
+1. selecciona/valida el target y prueba la conexión SSH;
+2. ejecuta discovery remoto read-only;
+3. identifica SO, servicios, red y controles;
+4. agrupa en **SAFE / REVIEW / RISKY** (sin score);
+5. pregunta solo el contexto que cambia una decisión;
+6. preview → confirmación → apply remoto (con backup en el target) → verify;
+7. rollback cuando corresponde (incluida verificación de **nueva conexión SSH**
+   tras cambios de SSH/firewall);
+8. entrega un resumen.
 
 ### CLI (read-only)
 
 ```bash
-bun run inspect
+bun run inspect admin@server.example
 ```
 
-Imprime el resumen del host y la evaluación agrupada en SAFE / REVIEW / RISKY.
+## Tools
 
-### Desde OpenCode
+- `target` — `connect` | `info` | `clear` (target por sesión).
+- `inspect_system` / `inspect_security`.
+- `harden_sysctl` (KRN-*), `harden_ssh` (SSH-*), `harden_firewall` (FW-*),
+  `harden_service` (SVC-*), `harden_logging` (LOG-*/AUD-*),
+  `harden_filesystem` (FS-*): `inspect|preview|apply|verify|rollback`.
 
-Agente: `.opencode/agents/server-hardener.md`.
+`apply`/`rollback` requieren `confirm: true` (tras confirmación explícita). Las
+tools no aceptan comandos: ejecutan operaciones predefinidas por `ssh` con
+argv (sin shell local) y backup/verificación.
 
-> Hardenizá este servidor.
+## Reglas de seguridad
 
-Workflow que sigue el agente:
+- Nunca asume `localhost`: si no hay target, pregunta.
+- Solo aplica controles `non-compliant`/`requires-review`.
+- Lockout = stop: `PasswordAuthentication no` se rechaza sin ruta secundaria
+  confirmada.
+- Nunca reemplaza un firewall ni genera reglas nftables automáticamente; nunca
+  cierra el acceso del operador (nunca default-deny primero).
+- Tras SSH/firewall, verifica una **nueva** conexión SSH desde la workstation;
+  si falla, intenta rollback.
+- No instala nada en el target (instalar `auditd` es una decisión explícita de
+  hardening, no una dependencia del framework).
+- No captura ni guarda passwords. Requiere root o `sudo -n`.
 
-```text
-inspección local → clasificación por riesgo (SAFE/REVIEW/RISKY)
-→ preguntas mínimas → selección del operador
-→ preview → confirmación → backup → apply → verify → (rollback) → resumen
-```
+## Backups y estado
 
-Tools disponibles:
-
-- `inspect_system` — resumen del host (`inspect`, `last-run`).
-- `inspect_security` — evaluación (`assess`, `explain`).
-- `harden_sysctl` — KRN-* (`inspect|preview|apply|verify|rollback`).
-- `harden_ssh` — SSH-*.
-- `harden_firewall` — FW-*.
-- `harden_service` — SVC-*.
-- `harden_logging` — LOG-*/AUD-*.
-- `harden_filesystem` — FS-*.
-
-`apply` y `rollback` requieren `confirm: true` (el agente pide confirmación
-explícita antes). Las tools no aceptan comandos: ejecutan operaciones
-predefinidas, con backup y verificación.
-
-Ejemplo de interacción:
-
-```text
-Host: srv-app-03 · OS: Ubuntu 24.04
-Detected: OpenSSH, nginx, docker, ufw
-
-SAFE (3)
-- KRN-003 ASLR
-- KRN-004 kernel pointers / ptrace
-- NET-002 plaintext protocols
-REVIEW (2)
-- SVC-002 enabled services vs role
-- FS-001 /tmp mount options
-RISKY (2)
-- SSH-002 SSH password authentication
-- FW-001 firewall default policy
-
-¿Empezamos por los SAFE?
-```
-
-## Estado local
+- Backups **en el target**: `/var/backups/server-hardener/<run-id>/` con
+  contenido, owner/group/mode y hash (rollback remoto).
+- Estado mínimo **en la workstation**:
 
 ```text
 .server-hardener/
-├── backups/               contenido + sha256 + modo/uid/gid del archivo
-├── last-run.json          aplicados / omitidos / fallidos / revertidos
+├── session.json           target activo de la sesión
+├── last-run.json          aplicados/omitidos/fallidos/revertidos + verificación
 └── optional-context.json  contexto operativo provisto por el operador
 ```
 
-Sin árboles por servidor, sin base de datos de planes.
+## Cobertura automática
 
-## Qué hace automáticamente
-
-- sysctl (KRN-001..004): drop-in `/etc/sysctl.d/99-server-hardener.conf` + runtime,
-  detecta conflictos.
-- SSH (SSH-001..005): backup, edición, `sshd -t`, **reload** (nunca restart);
-  si `sshd -t` falla restaura el backup. `PasswordAuthentication no` se rechaza
-  sin ruta secundaria confirmada.
-- Firewall (FW-001): solo ufw/firewalld ya presentes; asegura el puerto admin
-  antes de habilitar; **nunca** reemplaza un firewall ni genera reglas nftables.
-- Servicios (SVC-001): solo protocolos inseguros conocidos; nunca servicios
-  desconocidos.
-- Logging/auditoría (AUD-001/002, LOG-001): habilitar; instalar solo con
-  confirmación explícita y sin rollback automático.
-- Filesystem (FS-001/002): opciones en `/etc/fstab`; nunca remonta solo.
-
-Todo lo demás es `manual remediation required`.
+sysctl (KRN-001..004), SSH (SSH-001..005), firewall (FW-001, ufw/firewalld),
+servicios inseguros conocidos (SVC-001), logging/auditoría (AUD-001/002,
+LOG-001), fstab (FS-001/002). El resto es `manual remediation required`.
 
 ## Desarrollo
 
@@ -116,17 +111,13 @@ bun run lint       # biome check
 bun run typecheck  # tsc --noEmit
 bun test           # bun:test
 bun run build      # tsc -> dist/
-bun run inspect    # evaluación read-only del host local
+bun run inspect admin@server.example   # evaluación read-only de un target
 ```
 
 Estructura: ver `docs/ARCHITECTURE.md`.
 
 ## Fuera de alcance (a propósito)
 
-Windows, administración remota, fleet management, base de datos, API server,
-web UI, scheduler, daemon, multi-tenant, orquestación, dashboards de compliance,
-pentesting, scoring numérico, motores de plan/estado complejos.
-
-## Licencia
-
-Uso interno. Ajustá según corresponda.
+Fleet management, agentes/daemon remotos, API server, queue/scheduler, DB, web
+UI, orchestrator, Ansible/Terraform, deployment remoto del framework, Windows,
+scoring, pentesting, dashboards de compliance, motores de plan/estado complejos.

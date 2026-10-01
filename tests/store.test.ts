@@ -1,24 +1,21 @@
 /**
- * Local store tests: backups (content + metadata), last-run and optional context.
+ * Local state tests: session, last-run and optional context.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { PathSafetyError, StateError, ValidationFailureError } from "../src/hardening/errors";
-import type { BackupRecord } from "../src/hardening/models";
+import { StateError, ValidationFailureError } from "../src/hardening/errors";
 import {
   appendLastRun,
-  assertSafeId,
-  clearLastRun,
+  clearSession,
   defaultStoreRoot,
-  listBackups,
-  loadBackup,
   newBackupId,
   readContext,
   readLastRun,
-  saveBackup,
+  readSession,
   saveContext,
+  writeSession,
 } from "../src/hardening/store";
 import { sampleContext } from "./support";
 
@@ -35,66 +32,40 @@ afterEach(async () => {
   }
 });
 
-function backup(overrides: Partial<BackupRecord> = {}): BackupRecord {
-  return {
-    backupId: newBackupId(),
-    controlId: "SSH-005",
-    originalPath: "/etc/ssh/sshd_config",
-    createdAt: "2025-04-01T00:00:00.000Z",
-    sha256: "a".repeat(64),
-    bytes: 12,
-    mode: 0o644,
-    uid: 0,
-    gid: 0,
-    content: "MaxAuthTries 6\n",
-    ...overrides,
-  };
-}
-
 describe("defaults", () => {
   test("store lives under .server-hardener", () => {
     expect(defaultStoreRoot("/srv")).toBe("/srv/.server-hardener");
   });
 });
 
-describe("backups", () => {
-  test("round-trip preserves content and metadata", async () => {
+describe("session", () => {
+  test("round-trips and clears", async () => {
     const root = await tempRoot();
-    const record = backup();
-    await saveBackup(root, record);
-    const loaded = await loadBackup(root, record.backupId);
-    expect(loaded).toEqual(record);
-    expect((await listBackups(root)).length).toBe(1);
-  });
-
-  test("invalid backup is rejected before writing", async () => {
-    const root = await tempRoot();
-    await expect(saveBackup(root, backup({ bytes: -1 }))).rejects.toBeInstanceOf(ValidationFailureError);
-  });
-
-  test("corrupt backup is reported explicitly", async () => {
-    const root = await tempRoot();
-    const record = backup();
-    await saveBackup(root, record);
-    await writeFile(path.join(root, "backups", `${record.backupId}.json`), "{bad", "utf8");
-    await expect(loadBackup(root, record.backupId)).rejects.toBeInstanceOf(StateError);
-  });
-
-  test("traversal backup ids are rejected", () => {
-    for (const bad of ["../../etc", "../bkp", "/tmp/bkp", "bkp", "bkp/a"]) {
-      expect(() => assertSafeId(bad, /^bkp-[a-z0-9][a-z0-9-]{7,63}$/, "backup id")).toThrow(PathSafetyError);
-    }
+    expect(await readSession(root)).toBeNull();
+    await writeSession(root, {
+      target: "admin@server.example",
+      connectedAt: "2025-04-01T00:00:00.000Z",
+      hostname: "admin@server.example",
+      root: false,
+      sudo: true,
+      isLocalhost: false,
+    });
+    const session = await readSession(root);
+    expect(session?.target).toBe("admin@server.example");
+    await clearSession(root);
+    expect(await readSession(root)).toBeNull();
   });
 });
 
 describe("last-run", () => {
-  test("starts empty and records entries", async () => {
+  test("records entries with host, target and backupDir", async () => {
     const root = await tempRoot();
     expect(await readLastRun(root)).toBeNull();
     await appendLastRun(
       root,
       {
         at: "2025-04-01T00:00:00.000Z",
+        host: "admin@server.example",
         controlId: "SSH-005",
         action: "apply",
         target: "/etc/ssh/sshd_config",
@@ -103,21 +74,20 @@ describe("last-run", () => {
         message: "done",
         before: null,
         after: null,
+        backupDir: "/var/backups/server-hardener/run-1",
         verification: { check: "c", expected: "e", observed: "o", passed: true },
-        backupIds: [],
+        backupIds: [newBackupId()],
       },
-      { hostname: "srv-01", evaluated: 39 },
+      { hostname: "server", evaluated: 39 },
     );
     const run = await readLastRun(root);
-    expect(run?.entries.length).toBe(1);
-    expect(run?.entries[0]?.result).toBe("applied");
-    await clearLastRun(root);
-    expect(await readLastRun(root)).toBeNull();
+    expect(run?.entries[0]?.host).toBe("admin@server.example");
+    expect(run?.entries[0]?.backupDir).toContain("/var/backups/server-hardener/");
   });
 });
 
 describe("optional context", () => {
-  test("missing context returns null, saved context round-trips", async () => {
+  test("missing context returns null; saved context round-trips", async () => {
     const root = await tempRoot();
     expect(await readContext(root)).toBeNull();
     const context = sampleContext();
@@ -137,12 +107,18 @@ describe("optional context", () => {
   });
 });
 
-describe("store layout", () => {
-  test("backups directory is created", async () => {
+describe("layout", () => {
+  test("store root file is written atomically", async () => {
     const root = await tempRoot();
-    const record = backup();
-    await saveBackup(root, record);
-    const text = await readFile(path.join(root, "backups", `${record.backupId}.json`), "utf8");
-    expect(text).toContain("originalPath");
+    await writeSession(root, {
+      target: "localhost",
+      connectedAt: "t",
+      hostname: "localhost",
+      root: false,
+      sudo: false,
+      isLocalhost: true,
+    });
+    const text = await readFile(path.join(root, "session.json"), "utf8");
+    expect(text).toContain('"target": "localhost"');
   });
 });

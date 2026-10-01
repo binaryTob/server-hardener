@@ -595,14 +595,18 @@ export type LastRunResult = "applied" | "skipped" | "failed" | "rolled-back" | "
 /** One entry in `.server-hardener/last-run.json`. */
 export interface LastRunEntry {
   at: string;
+  /** Target host the change was applied to. */
+  host: string;
   controlId: string;
   action: "apply" | "rollback";
+  /** Change target (file path or service unit). */
   target: string;
   result: LastRunResult;
   changed: boolean;
   message: string;
   before: string | null;
   after: string | null;
+  backupDir: string | null;
   verification: {
     check: string;
     expected: string;

@@ -1,18 +1,19 @@
 /**
- * harden_filesystem — preview/apply/verify/rollback for filesystem controls.
+ * harden_filesystem — preview/apply/verify/rollback for filesystem controls on the target.
  */
 import { z } from "zod";
 import { domainAction, type HardenDomain } from "../../src/hardening/agent";
-import { ToolArgumentError } from "../../src/hardening/errors";
+import { NoTargetError, ToolArgumentError } from "../../src/hardening/errors";
 import { defaultStoreRoot } from "../../src/hardening/store";
 
 const DOMAIN: HardenDomain = "filesystem";
 const ACTIONS = ["inspect", "preview", "apply", "verify", "rollback"] as const;
-const ALLOWED = ["action", "controlId", "target", "confirm"] as const;
+const ALLOWED = ["action", "controlId", "target", "targetUnit", "confirm"] as const;
 
 export default {
   description:
-    "Manage filesystem/fstab controls (FS-*). Applies only predefined, backed-up, verified operations; apply/rollback require confirm:true and run locally.",
+    "Manage filesystem/fstab controls (FS-*). Operates on the TARGET server over SSH (the session target unless overridden). " +
+    "Applies only predefined, backed-up, verified operations; apply/rollback require confirm:true.",
   args: {
     action: z.enum(ACTIONS).describe("inspect | preview | apply | verify | rollback."),
     controlId: z
@@ -20,7 +21,8 @@ export default {
       .regex(/^[A-Z]{2,5}-\d{3}$/)
       .optional()
       .describe("Control id (required for preview/apply/verify/rollback)."),
-    target: z
+    target: z.string().min(1).optional().describe("Override the session target (alias or user@host)."),
+    targetUnit: z
       .string()
       .regex(/^[a-zA-Z0-9_.@:-]+\.(service|socket|timer)$/)
       .optional()
@@ -31,6 +33,7 @@ export default {
     action: (typeof ACTIONS)[number];
     controlId?: string;
     target?: string;
+    targetUnit?: string;
     confirm?: boolean;
   }) {
     for (const key of Object.keys(args)) {
@@ -41,9 +44,15 @@ export default {
     if ((args.action === "apply" || args.action === "rollback") && args.confirm !== true) {
       throw new ToolArgumentError(`'${args.action}' requires confirm:true after explicit operator approval.`);
     }
-    return domainAction(DOMAIN, args.action, args.controlId, {
-      storeRoot: defaultStoreRoot(),
-      ...(args.target !== undefined ? { target: args.target } : {}),
-    });
+    try {
+      return await domainAction(DOMAIN, args.action, args.controlId, {
+        storeRoot: defaultStoreRoot(),
+        ...(args.target !== undefined ? { target: args.target } : {}),
+        ...(args.targetUnit !== undefined ? { targetUnit: args.targetUnit } : {}),
+      });
+    } catch (err) {
+      if (err instanceof NoTargetError) return err.message;
+      throw err;
+    }
   },
 };

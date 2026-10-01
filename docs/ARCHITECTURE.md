@@ -1,132 +1,128 @@
-# Architecture — server-hardener (local agent)
+# Architecture — server-hardener (remote agent)
 
-`server-hardener` is a **local OpenCode agent** for hardening the Linux machine
-it runs on. You clone it inside the server, open OpenCode and say
-*"harden this server"*.
+`server-hardener` is an **OpenCode agent on the operator's workstation**. It
+administers **one target Linux server per session over SSH**. The target needs
+nothing installed: no OpenCode, Bun, Node, repo, API keys, daemon or agent.
 
-It is not a platform, daemon, service, fleet manager or Ansible replacement.
-There is no remote administration, no per-server identity, no plan database.
+```
+Operator workstation                 Target Linux server
+  OpenCode                             sshd
+  server-hardener       ── SSH ──▶     standard OS tools
+  skills / tools
+```
+
+SSH is only the transport used by the tools. It is not fleet management, not
+multi-server orchestration, and there is no deployment of the framework on the
+target.
 
 ## 1. Product
 
 ```
-ssh server
-cd server-hardener
+git clone server-hardener && cd server-hardener && bun install
 opencode
-> harden this server
+> harden admin@server.example
 ```
 
-The agent inspects the local host, proposes hardening grouped by risk, asks only
-the operational questions it needs, applies approved changes locally, verifies
-them and can roll them back.
+The agent identifies the target, verifies SSH, runs read-only discovery, groups
+hardening candidates by risk, asks the decision-critical questions, applies the
+selected changes with remote backups and verification, rolls back on failure and
+reports.
 
 ## 2. Layers
 
 ```
 src/hardening/
-├── exec.ts, fsio.ts, errors.ts     safe argv execution + read-only file reader
-├── collectors/linux.ts             read-only commands (fixed argv, no shell)
-├── parsers/linux/*.ts              pure text -> domain model
-├── inventory.ts                    discovery orchestrator + summary
-├── models.ts                       inventory, context, evaluation, tiers, backups
-├── validation.ts                   zod schemas + validators
-├── store.ts                        .server-hardener/ (backups, last-run, context)
-├── controls/                       catalog: applicability, assessment, risk,
-│                                   preconditions (pure functions)
-├── planning/                       context, applicability, risk, preconditions,
-│                                   evaluate (+ tier), questions
-├── remediation/                    sysctl, ssh, firewall, services, logging,
-│                                   filesystem + config/fsop helpers + run
-└── agent.ts                        high-level API + text rendering
+├── transport/
+│   ├── target.ts     target parsing/validation (alias, user@host, ip)
+│   ├── quote.ts      POSIX quoting for the remote command
+│   ├── host.ts       Host interface + createHost + probe
+│   ├── ssh.ts        SshHost (spawned ssh argv; BatchMode; sudo -n)
+│   └── local.ts      LocalHost (tests / explicit localhost only)
+├── exec.ts, fsio.ts, errors.ts
+├── collectors/linux.ts, parsers/linux/*.ts, inventory.ts
+├── models.ts, validation.ts
+├── store.ts          workstation state: session + last-run + optional context
+├── controls/         catalog (applicability/assess/risk/preconditions — pure)
+├── planning/         context, applicability, risk, preconditions, evaluate,
+│                     tiers, questions
+├── remediation/      sysctl/ssh/firewall/services/logging/filesystem + run
+└── agent.ts          target-aware high-level API + text rendering
 .opencode/
-├── agents/server-hardener.md       the agent experience
-├── skills/                         linux-discovery, linux-hardening,
-│   ssh/firewall/services/kernel/filesystem/logging-hardening, verification
-└── tools/                          inspect_system, inspect_security,
-    harden_sysctl, harden_ssh, harden_firewall, harden_service,
-    harden_logging, harden_filesystem
-scripts/inspect.ts                  CLI: read-only assessment
+├── agents/server-hardener.md
+├── skills/           linux-discovery, linux-hardening, ssh/firewall/services/
+│                     kernel/filesystem/logging-hardening, verification
+└── tools/            target, inspect_system, inspect_security, harden_*
+scripts/inspect.ts    CLI: read-only assessment of a target
 ```
 
-Data flows one way:
+## 3. Transport abstraction
 
-```
-Collector → parser → ServerInventory
-                       │
-        OperationalContext (optional)
-                       │
-                  ControlCatalog → applicability → assessment → risk →
-                  preconditions → tier → remediation (preview/apply/verify/rollback)
-```
+`Host` implements `CommandRunner` + `FileReader` plus privileged/file-write
+operations. Two implementations:
 
-The **engine**, not the LLM, decides applicability, compliance, risk,
-preconditions and tiers. The LLM gathers context and explains results.
+- **SshHost** (default): spawns `ssh` with an **argv array** (never a shell),
+  `BatchMode=yes`, `ConnectTimeout`, `NumberOfPasswordPrompts=0`; the remote
+  command is quoted. Privileged operations use `sudo -n` (never a password).
+  Honours `~/.ssh/config`, agent, `IdentityFile`, `ProxyJump`, `known_hosts`.
+- **LocalHost**: only used when the target is explicitly `localhost` (tests or
+  opt-in). It is never selected implicitly.
 
-## 3. Local state (`.server-hardener/`)
+The model cannot supply a command: tools call fixed operations whose argvs are
+built in code; `assertSafeCommand` rejects anything but bare command names.
+
+## 4. Target selection
+
+`target` accepts an ssh alias, `user@host` or `user@ip`. Parsing rejects
+option-shaped targets (`-oProxyCommand=…`) and shell metacharacters. The active
+target is remembered in `.server-hardener/session.json`; tools use it unless a
+`target` is given. **If there is no target, tools ask — they never fall back to
+localhost.**
+
+## 5. Discovery and evaluation
+
+Read-only collectors/parsers run unchanged against either Host. Controls are
+pure code; the engine decides applicability, compliance, risk, preconditions and
+the operator tier (`safe`/`review`/`risky`). No numeric score.
+
+## 6. Remediation
+
+Preview → apply → verify → rollback, per control:
+- **Backups live on the target** at `/var/backups/server-hardener/<run-id>/`
+  (content + SHA-256 + owner/group/mode), so nothing sensitive is pulled to the
+  workstation and rollback works remotely.
+- sysctl, SSH, firewall (ufw/firewalld only), services (known-insecure only),
+  logging/audit, filesystem fstab. Everything else is `manual remediation
+  required`.
+- **SSH/firewall reconnection check:** after an access-affecting change the tool
+  opens a NEW ssh connection from the workstation; if it fails it attempts a
+  rollback. Firewall never closes the operator's access and never defaults-deny
+  first.
+
+## 7. Privileges
+
+Root SSH or an admin user with passwordless `sudo -n`. Availability is probed;
+if neither works, privileged controls are refused with a clear message. No
+password is ever captured or stored.
+
+## 8. Local state (workstation)
 
 ```
 .server-hardener/
-├── backups/               one JSON per backed-up file (content + sha256 + mode/uid/gid)
-├── last-run.json          applied/skipped/failed/rolled-back entries + verification
+├── session.json           active target for the session
+├── last-run.json          applied/skipped/failed/rolled-back + verification
 └── optional-context.json  operator-supplied operational context
 ```
 
-No per-server tree, no plan store, no database. Writes are atomic; ids are
-validated and cannot escape the directory.
+## 9. Tests
 
-## 4. Discovery and evaluation
+`tests/`: parsers, discovery, assessment, store (session/last-run/context),
+and a security suite covering target validation, safe ssh argv, host-key/auth/
+timeout classification, and the rule that no tool assumes localhost. Execution
+tests run against an in-memory `FakeHost` (preview/backup/apply/verify/rollback)
+without real SSH.
 
-- **Discovery** runs fixed, read-only commands (no shell) and reads well-known
-  files. Each section reports `success|partial|unsupported|insufficient-permissions|unavailable|error`;
-  one failing section never aborts the inspection.
-- **Controls** are code with pure `applicability`, `assess`, `adjustRisk` and
-  `preconditions` functions. Statuses: `compliant`, `non-compliant`,
-  `not-applicable`, `unknown`, `requires-context`, `requires-review`, `blocked`,
-  `unsupported`, `error`.
-- **Tiers** group actionable controls for the operator: `safe`, `review`,
-  `risky` (and `skip`). Classification uses risk levels (no numeric score): a
-  change that can cut access or disrupt availability is `risky`.
-- **Risk** is context-sensitive. Example: disabling SSH password authentication
-  is `lockout=low` with a confirmed secondary path and `lockout=critical`
-  without one.
-- **Questions** are generated only for context that actually changes a decision
-  (e.g. secondary management path, console access, administrative networks).
+## 10. Deliberately out of scope
 
-## 5. Remediation
-
-Supported: sysctl (KRN-001..004), SSH (SSH-001..005), firewall (FW-001,
-ufw/firewalld only), services (SVC-001 known-insecure only), logging/audit
-(AUD-001/002, LOG-001), filesystem fstab (FS-001/002). Everything else is
-`manual remediation required`.
-
-Each remediation:
-1. **preview** (read-only) — current, desired, steps, files, commands, warnings;
-2. **apply** — back up files, edit atomically, reload (not restart), then verify;
-3. **verify** — real state, not exit codes;
-4. **rollback** — restore backups / previous state, or say
-   `manual rollback required`.
-
-## 6. Safety model
-
-- Tools accept only bounded arguments (`action`, `controlId`, `target`,
-  `confirm`); the model cannot supply a command.
-- Commands are fixed argvs executed without a shell (timeouts, output caps).
-- `apply`/`rollback` require `confirm: true` after explicit operator approval.
-- Only `non-compliant`/`requires-review` controls can be applied.
-- Root is required where needed; **no sudo escalation** is performed.
-- SSH lockout controls refuse to run without a confirmed secondary path;
-  firewalls never close administrative access automatically; nftables and
-  package removal are never automated.
-
-## 7. Tests
-
-`tests/`: parsers, discovery/inventory, assessment (applicability/risk/
-preconditions/tiers), local store, execution (preview/backup/apply/verify/
-rollback/safety gates) and tool security. Deterministic fakes and a temporary
-system tree; no real host is modified.
-
-## 8. Deliberately out of scope
-
-Windows, remote administration, fleet management, database, API/server, web UI,
-scheduler, daemon, cloud service, multi-tenancy, orchestration, compliance
-dashboard, pentesting/offensive security, scoring, complex plan/state engines.
+Fleet management, remote agents, daemon, API server, queue/scheduler, DB,
+web UI, orchestrator, Ansible/Terraform, remote deployment of the framework.
+Windows. Scoring, pentesting, compliance dashboards, complex plan/state engines.

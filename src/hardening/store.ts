@@ -1,29 +1,37 @@
 /**
- * Local agent state.
- *
- * Everything lives under `.server-hardener/` next to where OpenCode runs:
+ * Minimal local state on the workstation: `.server-hardener/`.
  *
  *   .server-hardener/
- *   ├── backups/            one JSON per backed-up file (content + hash + mode)
- *   ├── last-run.json       what was evaluated/applied/verified/rolled back
- *   └── optional-context.json   operator-supplied operational context
+ *   ├── session.json          the target selected for this session
+ *   ├── last-run.json         applied / skipped / failed / rolled-back entries
+ *   └── optional-context.json operator-supplied operational context
  *
- * There is no per-server tree, no server identity and no plan database.
- * Writes are atomic; identifiers are validated and never escape the root.
+ * Configuration backups live on the TARGET, not here. There is no per-server
+ * tree, no fleet state and no plan database.
  */
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { PathSafetyError, StateError } from "./errors";
-import type { BackupRecord, LastRun, LastRunEntry, OperationalContext } from "./models";
-import { validateBackupRecord, validateLastRun, validateOperationalContext } from "./validation";
+import type { LastRun, LastRunEntry, OperationalContext } from "./models";
+import { validateLastRun, validateOperationalContext } from "./validation";
 
 export const STORE_DIR = ".server-hardener";
 export const LAST_RUN_FILE = "last-run.json";
 export const CONTEXT_FILE = "optional-context.json";
+export const SESSION_FILE = "session.json";
 
-const BACKUP_ID_PATTERN = /^bkp-[a-z0-9][a-z0-9-]{7,63}$/;
-const VERIFICATION_ID_PATTERN = /^ver-[a-z0-9][a-z0-9-]{7,63}$/;
+const ID_PATTERN = /^(bkp|ver)-[a-z0-9][a-z0-9-]{7,63}$/;
+
+/** The target selected for the current session. */
+export interface SessionInfo {
+  target: string;
+  connectedAt: string;
+  hostname: string | null;
+  root: boolean;
+  sudo: boolean;
+  isLocalhost: boolean;
+}
 
 /** Default store root: `.server-hardener` in the current working directory. */
 export function defaultStoreRoot(cwd: string = process.cwd()): string {
@@ -44,6 +52,12 @@ export function newVerificationId(): string {
   return `ver-${randomUUID()}`;
 }
 
+export function newRunId(): string {
+  return `run-${randomUUID()}`;
+}
+
+export { ID_PATTERN };
+
 async function atomicWrite(target: string, document: unknown): Promise<void> {
   await mkdir(path.dirname(target), { recursive: true });
   const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
@@ -62,58 +76,38 @@ async function atomicWrite(target: string, document: unknown): Promise<void> {
 }
 
 export async function ensureStore(storeRoot: string): Promise<void> {
-  await mkdir(path.join(storeRoot, "backups"), { recursive: true });
+  await mkdir(storeRoot, { recursive: true });
 }
 
-// --- Backups ---------------------------------------------------------------
+// --- session ---------------------------------------------------------------
 
-function backupPath(storeRoot: string, backupId: string): string {
-  assertSafeId(backupId, BACKUP_ID_PATTERN, "backup id");
-  return path.join(storeRoot, "backups", `${backupId}.json`);
+export async function readSession(storeRoot: string): Promise<SessionInfo | null> {
+  let text: string;
+  try {
+    text = await readFile(path.join(storeRoot, SESSION_FILE), "utf8");
+  } catch (err) {
+    if ((err as { code?: string }).code === "ENOENT") return null;
+    throw new StateError("session.json is not readable", { cause: err });
+  }
+  try {
+    return JSON.parse(text) as SessionInfo;
+  } catch (err) {
+    throw new StateError("session.json is corrupt", { cause: err });
+  }
 }
 
-export async function saveBackup(storeRoot: string, backup: BackupRecord): Promise<string> {
-  validateBackupRecord(backup);
-  const target = backupPath(storeRoot, backup.backupId);
-  await ensureStore(storeRoot);
-  await atomicWrite(target, backup);
+export async function writeSession(storeRoot: string, session: SessionInfo): Promise<string> {
+  const target = path.join(storeRoot, SESSION_FILE);
+  await atomicWrite(target, session);
   return target;
 }
 
-export async function loadBackup(storeRoot: string, backupId: string): Promise<BackupRecord> {
-  const file = backupPath(storeRoot, backupId);
-  let text: string;
+export async function clearSession(storeRoot: string): Promise<void> {
   try {
-    text = await readFile(file, "utf8");
-  } catch (err) {
-    throw new StateError(`no readable backup ${backupId}`, { cause: err });
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch (err) {
-    throw new StateError(`backup ${backupId} is corrupt`, { cause: err });
-  }
-  return validateBackupRecord(parsed);
-}
-
-export async function listBackups(storeRoot: string): Promise<BackupRecord[]> {
-  let entries: string[];
-  try {
-    entries = await readdir(path.join(storeRoot, "backups"));
+    await unlink(path.join(storeRoot, SESSION_FILE));
   } catch {
-    return [];
+    // nothing to clear
   }
-  const backups: BackupRecord[] = [];
-  for (const entry of entries) {
-    if (!entry.endsWith(".json")) continue;
-    try {
-      backups.push(await loadBackup(storeRoot, entry.slice(0, -".json".length)));
-    } catch {
-      // skip unreadable
-    }
-  }
-  return backups;
 }
 
 // --- last-run --------------------------------------------------------------
@@ -132,10 +126,6 @@ export async function readLastRun(storeRoot: string): Promise<LastRun | null> {
   }
 }
 
-/**
- * Append one entry to last-run.json (creating it if needed) and return the
- * updated summary.
- */
 export async function appendLastRun(
   storeRoot: string,
   entry: LastRunEntry,
@@ -188,5 +178,3 @@ export async function saveContext(storeRoot: string, context: OperationalContext
   await atomicWrite(target, context);
   return target;
 }
-
-export { VERIFICATION_ID_PATTERN };

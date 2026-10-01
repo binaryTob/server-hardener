@@ -404,6 +404,7 @@ const verificationSummarySchema = z.object({
 
 export const lastRunEntrySchema = z.object({
   at: z.string().min(1),
+  host: z.string().min(1),
   controlId: z.string().min(1),
   action: z.enum(["apply", "rollback"]),
   target: z.string(),
@@ -412,6 +413,7 @@ export const lastRunEntrySchema = z.object({
   message: z.string(),
   before: z.string().nullable(),
   after: z.string().nullable(),
+  backupDir: z.string().nullable(),
   verification: verificationSummarySchema.nullable(),
   backupIds: z.array(z.string()),
 });

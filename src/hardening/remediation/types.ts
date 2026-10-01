@@ -13,8 +13,9 @@ import type {
   ServerInventory,
   VerificationResult,
 } from "../models";
+import type { Host } from "../transport/host";
 
-/** Filesystem locations the remediation engine writes to (overridable in tests). */
+/** Filesystem locations on the TARGET host (overridable in tests). */
 export interface SystemPaths {
   sshdConfig: string;
   sysctlConfDir: string;
@@ -32,13 +33,20 @@ export function defaultSystemPaths(): SystemPaths {
 }
 
 export interface RemediationContext {
+  /** Transport to the target (remote SSH, or localhost when explicit). */
+  host: Host;
+  /** Privileged runner (sudo -n on ssh targets). */
+  runner: CommandRunner;
   inventory: ServerInventory;
   context: OperationalContext;
   control: EvaluatedControl;
-  storeRoot: string;
-  runner: CommandRunner;
   paths: SystemPaths;
+  /** Identifier for this apply run; backups are grouped under it on the target. */
+  runId: string;
+  /** Target directory for backups, or null when none could be created. */
+  backupDir: string | null;
   hasRoot: boolean;
+  sudo: boolean;
   now: () => string;
   /** Optional operator selection, e.g. an explicit service unit. */
   target?: string;

@@ -1,24 +1,22 @@
 ---
 name: linux-hardening
-description: Overall workflow to harden the local host safely. Use when the user asks to harden the server, to group candidates by risk, or to decide what to apply.
+description: Overall workflow to harden the target server safely over SSH. Use when the user asks to harden a server, to group candidates by risk, or to decide what to apply.
 ---
-# Linux hardening workflow
+# Hardening workflow (remote)
 
-1. `inspect_security` → candidates grouped SAFE / REVIEW / RISKY, plus
-   decision-critical questions.
-2. Ask only the questions the engine needs (they change a decision).
-3. Operator selects; for each control: preview → confirm → apply → verify →
-   (rollback on failure).
-4. Always protect availability and access.
+1. Select/confirm the target (`target` connect).
+2. `inspect_security` → SAFE / REVIEW / RISKY + decision-critical questions.
+3. Ask only the questions the engine needs.
+4. For each selected control: preview → confirm → apply → verify → (rollback).
+5. Summarize applied / skipped / failed / rolled back.
 
 Classification:
 - SAFE: low operational impact, no lockout.
-- REVIEW: needs the operator's intent (why a service exists, is a setting
-  justified).
+- REVIEW: needs the operator's intent.
 - RISKY: can cut access or disrupt services (SSH, firewall).
 
 Rules:
-- Never apply controls the assessment did not mark actionable.
-- No numeric score. Backup before edit; verify after; roll back on failure.
-- Prefer the least disruptive method (reload over restart, runtime+persistent for
-  sysctl).
+- Only apply controls marked non-compliant/requires-review.
+- Backups are stored ON THE TARGET (`/var/backups/server-hardener/<run-id>/`).
+- Verify real state, not exit codes. Roll back on failure.
+- Never touch localhost unless it was explicitly selected as the target.

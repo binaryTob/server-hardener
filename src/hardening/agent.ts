@@ -1,36 +1,40 @@
 /**
- * High-level local agent API.
+ * High-level agent API.
  *
- * Ties discovery + controls + remediation together for the local host and
- * produces the human-readable text the OpenCode tools return. Tools stay thin;
- * all orchestration and formatting lives here so it is testable without
- * OpenCode.
+ * The agent runs on the OPERATOR workstation and operates on ONE target host
+ * per session via SSH (or LocalHost only when `localhost` is named explicitly).
+ * This module resolves the target, runs discovery/evaluation against it, drives
+ * remediation and renders text for the OpenCode tools.
  */
 import { CATALOG_VERSION, CONTROL_CATALOG } from "./controls/catalog";
-import type { CommandRunner } from "./exec";
-import type { FileReader } from "./fsio";
+import { NoTargetError } from "./errors";
 import { formatSummary, runDiscovery, summarizeInventory } from "./inventory";
-import type { EvaluatedControl, OperationalContext, PlanningQuestion, ServerInventory, Tier } from "./models";
+import type { EvaluatedControl, OperationalContext, PlanningQuestion, Tier } from "./models";
 import { contextCompleteness, emptyContext, withDetectedRoles } from "./planning/context";
 import { evaluateCatalog } from "./planning/evaluate";
 import { buildQuestions, missingContextByPath } from "./planning/questions";
-import { getRemediation } from "./remediation/registry";
 import {
   applyControl,
+  type ExecuteRequest,
   type ExecutionOutcome,
   previewControl,
   rollbackControl,
   verifyControl,
 } from "./remediation/run";
-import type { SystemPaths } from "./remediation/types";
-import { defaultStoreRoot, readContext, readLastRun } from "./store";
+import {
+  defaultStoreRoot,
+  readContext,
+  readLastRun,
+  readSession,
+  type SessionInfo,
+  writeSession,
+} from "./store";
+import { createHost, type Host, type HostFactoryOptions, probeHost } from "./transport/host";
+import { parseTarget, type TargetSpec } from "./transport/target";
 
 export interface AgentDeps {
   storeRoot?: string;
-  runner?: CommandRunner;
-  files?: FileReader;
-  paths?: SystemPaths;
-  hasRoot?: boolean;
+  hostOptions?: HostFactoryOptions;
   now?: () => string;
 }
 
@@ -45,82 +49,164 @@ export const HARDEN_DOMAINS = {
 
 export type HardenDomain = keyof typeof HARDEN_DOMAINS;
 
+export interface HostMeta {
+  label: string;
+  target: string;
+  root: boolean;
+  sudo: boolean;
+  isLocalhost: boolean;
+  hostname: string | null;
+}
+
 export interface Assessment {
-  inventory: ServerInventory;
+  meta: HostMeta;
   context: OperationalContext;
   controls: EvaluatedControl[];
   byTier: Record<Tier, EvaluatedControl[]>;
   questions: PlanningQuestion[];
   contextMissing: string[];
   catalogVersion: string;
+  inventorySummary: string;
 }
 
 function now(deps: AgentDeps): string {
   return (deps.now ?? (() => new Date().toISOString()))();
 }
 
-/** Discover the local host and evaluate the whole catalog against it. */
-export async function assess(deps: AgentDeps = {}): Promise<Assessment> {
-  const storeRoot = deps.storeRoot ?? defaultStoreRoot();
-  const inventory = await runDiscovery({
-    ...(deps.runner ? { runner: deps.runner } : {}),
-    ...(deps.files ? { files: deps.files } : {}),
-    ...(deps.now ? { now: deps.now } : {}),
-  });
+// --- Target resolution -----------------------------------------------------
+
+function resolveTargetString(explicit: string | undefined, session: SessionInfo | null): string {
+  if (explicit !== undefined) return explicit;
+  if (session) return session.target;
+  throw new NoTargetError(
+    'No target selected. Choose a server first, e.g. target { action: "connect", target: "admin@server.example" }.',
+  );
+}
+
+export async function resolveHost(
+  storeRoot: string,
+  explicitTarget: string | undefined,
+  deps: AgentDeps,
+): Promise<{ host: Host; spec: TargetSpec; session: SessionInfo | null }> {
+  const session = await readSession(storeRoot);
+  const targetString = resolveTargetString(explicitTarget, session);
+  const spec = parseTarget(targetString);
+  const host = createHost(spec, deps.hostOptions ?? {});
+  return { host, spec, session };
+}
+
+export interface ConnectResult {
+  host: Host;
+  spec: TargetSpec;
+  info: SessionInfo;
+  connectionMessage: string;
+}
+
+/** Validate + connect to a target and remember it for the session. */
+export async function connectTarget(
+  storeRoot: string,
+  targetString: string,
+  deps: AgentDeps,
+): Promise<ConnectResult> {
+  const spec = parseTarget(targetString);
+  const host = createHost(spec, deps.hostOptions ?? {});
+  const connection = await host.verifyConnection();
+  if (connection.status !== "ok") {
+    throw new NoTargetError(describeConnection(connection));
+  }
+  const probe = await probeHost(host);
+  const info: SessionInfo = {
+    target: targetString.trim(),
+    connectedAt: now(deps),
+    hostname: host.label,
+    root: probe.root,
+    sudo: probe.sudo,
+    isLocalhost: spec.isLocalhost,
+  };
+  await writeSession(storeRoot, info);
+  return { host, spec, info, connectionMessage: "SSH connection OK." };
+}
+
+export function describeTargetInfo(targetString: string, info: SessionInfo): string {
+  const lines = [
+    `Active target: ${targetString}`,
+    `  destination: ${info.hostname ?? "(unknown)"}`,
+    `  local: ${info.isLocalhost}`,
+    `  root: ${info.root} · passwordless sudo: ${info.sudo}`,
+    `  connectedAt: ${info.connectedAt}`,
+  ];
+  if (!info.root && !info.sudo) {
+    lines.push("  note: privileged changes need root or passwordless sudo on the target.");
+  }
+  return lines.join("\n");
+}
+
+function describeConnection(outcome: { failureKind?: string; stderr: string; status: string }): string {
+  switch (outcome.failureKind) {
+    case "host-key":
+      return "SSH host key verification failed. Add the host to known_hosts (or verify its fingerprint) and retry.";
+    case "auth":
+      return "SSH authentication failed. Check your ssh config, agent and keys.";
+    case "connection":
+      return "SSH connection failed (unreachable / refused / timed out).";
+    case "timeout":
+      return "SSH connection timed out.";
+    default:
+      return `SSH connection failed: ${outcome.stderr.trim() || outcome.status}`;
+  }
+}
+
+// --- Assessment ------------------------------------------------------------
+
+async function assessHost(
+  host: Host,
+  spec: TargetSpec,
+  storeRoot: string,
+  deps: AgentDeps,
+): Promise<Assessment> {
+  const inventory = await runDiscovery({ runner: host, files: host, platform: host.platformHint });
   const stored = await readContext(storeRoot);
   const context = withDetectedRoles(stored ?? emptyContext(now(deps)), inventory);
   const { controls, byTier } = evaluateCatalog(CONTROL_CATALOG, inventory, context);
   const questions = buildQuestions(missingContextByPath(controls));
+  const probe = await probeHost(host);
   return {
-    inventory,
+    meta: {
+      label: host.label,
+      target: spec.raw,
+      root: probe.root,
+      sudo: probe.sudo,
+      isLocalhost: spec.isLocalhost,
+      hostname: inventory.identity.data?.hostname ?? null,
+    },
     context,
     controls,
     byTier,
     questions,
     contextMissing: contextCompleteness(context).missing,
     catalogVersion: CATALOG_VERSION,
+    inventorySummary: formatSummary(summarizeInventory(inventory)),
   };
+}
+
+export async function assess(deps: AgentDeps & { target?: string } = {}): Promise<Assessment> {
+  const storeRoot = deps.storeRoot ?? defaultStoreRoot();
+  const { host, spec } = await resolveHost(storeRoot, deps.target, deps);
+  return assessHost(host, spec, storeRoot, deps);
 }
 
 // --- Text rendering --------------------------------------------------------
 
-function detectedCapabilities(inventory: ServerInventory): string[] {
-  const found = new Set<string>();
-  const controls = inventory.securityControls.data;
-  if (controls?.sshServer.available) found.add("OpenSSH");
-  for (const runtime of inventory.containers.data?.runtimes ?? []) found.add(runtime.name);
-  for (const capability of controls?.endpointProtection ?? []) found.add(capability.name);
-  for (const implementation of controls?.firewall.detectedImplementations ?? []) found.add(implementation);
-  for (const name of inventory.services.data?.services ?? []) {
-    if (
-      name.active === true &&
-      ["nginx", "apache2", "httpd", "docker", "postgresql", "mysql", "mariadb"].some((s) =>
-        name.name.includes(s),
-      )
-    ) {
-      found.add(name.name);
-    }
-  }
-  return [...found];
-}
-
 export function formatAssessment(assessment: Assessment): string {
   const lines: string[] = [];
-  const identity = assessment.inventory.identity.data;
-  lines.push(`Host: ${identity?.hostname ?? "(unknown)"}`);
-  lines.push(`OS:   ${assessment.inventory.operatingSystem.data?.distribution ?? "(unknown)"}`);
-  const detected = detectedCapabilities(assessment.inventory);
-  if (detected.length > 0) lines.push(`Detected: ${detected.join(", ")}`);
+  lines.push(`Target: ${assessment.meta.label}`);
+  lines.push(`Host:   ${assessment.meta.hostname ?? "(unknown)"}`);
+  lines.push("");
+  lines.push(assessment.inventorySummary);
   lines.push("");
 
-  const actionable = (tier: Tier) => assessment.byTier[tier];
-  const total = actionable("safe").length + actionable("review").length + actionable("risky").length;
-  if (total === 0) {
-    lines.push("No hardening opportunities found with the current evidence/context.");
-  }
-
   const renderTier = (label: string, tier: Tier) => {
-    const controls = actionable(tier);
+    const controls = assessment.byTier[tier];
     if (controls.length === 0) return;
     lines.push(`${label} (${controls.length})`);
     for (const control of controls) {
@@ -133,11 +219,7 @@ export function formatAssessment(assessment: Assessment): string {
   renderTier("REVIEW", "review");
   renderTier("RISKY", "risky");
 
-  const skipped = assessment.byTier.skip.length;
-  if (skipped > 0) lines.push(`(${skipped} controls already compliant / not applicable)`);
-
   if (assessment.contextMissing.length > 0) {
-    lines.push("");
     lines.push(`Operational context incomplete: ${assessment.contextMissing.join(", ")}`);
   }
   if (assessment.questions.length > 0) {
@@ -161,29 +243,13 @@ export function formatControlDetail(control: EvaluatedControl): string {
   lines.push(
     `risk: security=${control.risk.securityImpact} availability=${control.risk.availabilityRisk} lockout=${control.risk.lockoutRisk}`,
   );
-  if (control.evidence.length > 0) {
-    lines.push("evidence:");
-    for (const item of control.evidence) {
-      lines.push(
-        `  - ${item.inventoryPath} = ${item.observed ?? "(null)"}${item.note ? ` (${item.note})` : ""}`,
-      );
-    }
+  for (const precondition of control.preconditions) {
+    lines.push(
+      `  precondition ${precondition.critical ? "[critical] " : ""}${precondition.id}: ${precondition.status}`,
+    );
   }
-  if (control.preconditions.length > 0) {
-    lines.push("preconditions:");
-    for (const precondition of control.preconditions) {
-      lines.push(
-        `  - ${precondition.critical ? "[critical]" : "[optional]"} ${precondition.id}: ${precondition.status}`,
-      );
-    }
-  }
-  if (control.blockers.length > 0) {
-    lines.push("blocked:");
-    for (const blocker of control.blockers) lines.push(`  - ${blocker}`);
-  }
-  if (control.missingContext.length > 0) {
-    lines.push(`missing context: ${control.missingContext.join(", ")}`);
-  }
+  for (const blocker of control.blockers) lines.push(`  blocked: ${blocker}`);
+  if (control.missingContext.length > 0) lines.push(`missing context: ${control.missingContext.join(", ")}`);
   return lines.join("\n");
 }
 
@@ -202,11 +268,11 @@ export function formatPreview(preview: NonNullable<ExecutionOutcome["preview"]>)
   lines.push("Steps:");
   for (const step of preview.steps) lines.push(`  - ${step}`);
   if (preview.files.length > 0) {
-    lines.push("Files (backed up first):");
+    lines.push("Files (backed up first, on the target):");
     for (const file of preview.files) lines.push(`  - ${file.path}`);
   }
   if (preview.commands.length > 0) {
-    lines.push("Commands:");
+    lines.push("Commands (on the target):");
     for (const command of preview.commands) lines.push(`  - ${command}`);
   }
   if (preview.warnings.length > 0) {
@@ -216,7 +282,7 @@ export function formatPreview(preview: NonNullable<ExecutionOutcome["preview"]>)
   }
   lines.push("");
   lines.push(
-    "To apply: call the matching harden_* tool with action 'apply' and confirm: true after operator approval.",
+    `To apply: call the matching harden_* tool with action 'apply' and confirm: true after operator approval.`,
   );
   return lines.join("\n");
 }
@@ -233,26 +299,23 @@ export function formatOutcome(outcome: ExecutionOutcome): string {
     lines.push(`  expected: ${outcome.verification.expected}`);
     lines.push(`  observed: ${outcome.verification.observed ?? "(none)"}`);
   }
-  if (outcome.backupIds.length > 0) lines.push(`backups: ${outcome.backupIds.join(", ")}`);
+  if (outcome.backupIds.length > 0) lines.push(`backups (on target): ${outcome.backupIds.join(", ")}`);
   return lines.join("\n");
 }
 
 // --- Domain operations -----------------------------------------------------
 
-function domainControls(assessment: Assessment, domain: HardenDomain): EvaluatedControl[] {
-  const prefixes = HARDEN_DOMAINS[domain];
-  return assessment.controls.filter((control) => prefixes.some((p) => control.controlId.startsWith(`${p}-`)));
-}
-
-/** True when a control id belongs to a hardening domain (pure, for tools/tests). */
 export function controlBelongsToDomain(domain: HardenDomain, controlId: string): boolean {
   return HARDEN_DOMAINS[domain].some((prefix) => controlId.startsWith(`${prefix}-`));
 }
 
+function domainControls(assessment: Assessment, domain: HardenDomain): EvaluatedControl[] {
+  return assessment.controls.filter((control) => controlBelongsToDomain(domain, control.controlId));
+}
+
 export function formatDomainInspect(assessment: Assessment, domain: HardenDomain): string {
-  const controls = domainControls(assessment, domain);
-  const lines: string[] = [`${domain} controls (local host)`];
-  for (const control of controls) {
+  const lines: string[] = [`${domain} controls on ${assessment.meta.label}`];
+  for (const control of domainControls(assessment, domain)) {
     lines.push(`- ${control.controlId} [${control.tier}/${control.status}] ${control.title}`);
     lines.push(`    current: ${control.currentState ?? "(unknown)"}`);
     lines.push(`    desired: ${control.desiredState}`);
@@ -260,56 +323,71 @@ export function formatDomainInspect(assessment: Assessment, domain: HardenDomain
   return lines.join("\n");
 }
 
-function findDomainControl(
-  assessment: Assessment,
-  domain: HardenDomain,
-  controlId: string,
-): EvaluatedControl {
-  if (!controlBelongsToDomain(domain, controlId)) {
-    throw new Error(`control ${controlId} does not belong to ${domain}`);
-  }
-  const control = assessment.controls.find((c) => c.controlId === controlId);
-  if (!control) throw new Error(`unknown control ${controlId}`);
-  return control;
-}
-
 export async function domainAction(
   domain: HardenDomain,
   action: "inspect" | "preview" | "apply" | "verify" | "rollback",
   controlId: string | undefined,
-  deps: AgentDeps & { target?: string } = {},
+  deps: AgentDeps & { target?: string; targetUnit?: string } = {},
 ): Promise<string> {
-  const assessment = await assess(deps);
+  const storeRoot = deps.storeRoot ?? defaultStoreRoot();
+  const { host, spec } = await resolveHost(storeRoot, deps.target, deps);
+  const assessment = await assessHost(host, spec, storeRoot, deps);
+
   if (action === "inspect") return formatDomainInspect(assessment, domain);
-  if (!controlId) throw new Error(`action ${action} requires a controlId`);
-  const control = findDomainControl(assessment, domain, controlId);
-  const request = {
-    storeRoot: deps.storeRoot ?? defaultStoreRoot(),
-    inventory: assessment.inventory,
+  if (!controlId) throw new NoTargetError(`action ${action} requires a controlId`);
+  if (!controlBelongsToDomain(domain, controlId)) {
+    throw new NoTargetError(`control ${controlId} does not belong to ${domain}`);
+  }
+  const control = assessment.controls.find((c) => c.controlId === controlId);
+  if (!control) throw new NoTargetError(`unknown control ${controlId}`);
+
+  const request: ExecuteRequest = {
+    storeRoot,
+    host,
+    inventory: await runDiscovery({ runner: host, files: host, platform: host.platformHint }),
     context: assessment.context,
     control,
-    ...(deps.runner ? { runner: deps.runner } : {}),
-    ...(deps.paths ? { paths: deps.paths } : {}),
-    ...(deps.hasRoot !== undefined ? { hasRoot: deps.hasRoot } : {}),
+    targetHost: host.label,
+    hasRoot: assessment.meta.root,
+    sudo: assessment.meta.sudo,
     ...(deps.now ? { now: deps.now } : {}),
-    ...(deps.target !== undefined ? { target: deps.target } : {}),
+    ...(deps.targetUnit !== undefined ? { target: deps.targetUnit } : {}),
   };
+
   switch (action) {
     case "preview": {
       const outcome = await previewControl(request);
       return outcome.preview ? formatPreview(outcome.preview) : outcome.message;
     }
-    case "apply":
-      return formatOutcome(await applyControl(request));
     case "verify":
       return formatOutcome(await verifyControl(request));
     case "rollback":
       return formatOutcome(await rollbackControl(request));
+    case "apply": {
+      const outcome = await applyControl(request);
+      let text = formatOutcome(outcome);
+      if (outcome.changed && (domain === "ssh" || domain === "firewall")) {
+        text += await reconnectCheck(host, request);
+      }
+      return text;
+    }
   }
 }
 
-export function formatSystemInspection(inventory: ServerInventory): string {
-  return formatSummary(summarizeInventory(inventory));
+/** After an access-affecting change, prove a NEW connection from here works. */
+async function reconnectCheck(host: Host, request: ExecuteRequest): Promise<string> {
+  const connection = await host.verifyConnection();
+  if (connection.status === "ok") {
+    return "\nreconnect check: OK — a new SSH session from the workstation succeeded.";
+  }
+  const rollback = await rollbackControl(request);
+  return `\nreconnect check: FAILED (${connection.failureKind ?? connection.status}). Automatic rollback attempted: ${rollback.message}`;
+}
+
+// --- Misc ------------------------------------------------------------------
+
+export function formatSystemInspection(summary: string): string {
+  return summary;
 }
 
 export async function lastRunSummary(storeRoot: string): Promise<string> {
@@ -318,11 +396,9 @@ export async function lastRunSummary(storeRoot: string): Promise<string> {
   const lines = [`last run: ${run.updatedAt} · host: ${run.hostname ?? "(unknown)"}`];
   if (run.entries.length === 0) lines.push("no changes recorded");
   for (const entry of run.entries) {
-    lines.push(`- ${entry.at} ${entry.action} ${entry.controlId} [${entry.result}] ${entry.message}`);
+    lines.push(
+      `- ${entry.at} ${entry.host} ${entry.action} ${entry.controlId} [${entry.result}] ${entry.message}`,
+    );
   }
   return lines.join("\n");
-}
-
-export function remediationImplemented(controlId: string): boolean {
-  return !getRemediation(controlId).manual;
 }

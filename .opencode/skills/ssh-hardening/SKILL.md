@@ -1,23 +1,22 @@
 ---
 name: ssh-hardening
-description: SSH hardening rules (root login, password auth, MaxAuthTries, X11, empty passwords). Use before changing any SSH directive.
+description: SSH hardening over a remote connection. Use before changing any SSH directive on the target.
 ---
-# SSH hardening
+# SSH hardening (remote, lockout-sensitive)
 
-Tool: `harden_ssh` (`inspect|preview|apply|verify|rollback`).
+Tool: `harden_ssh`. You are connected OVER SSH: a bad change can lock you out.
 
-Safety, in order:
-1. **Lockout check.** Before disabling password authentication, confirm a
-   working alternative: a secondary management path and/or console access. The
-   engine refuses `PasswordAuthentication no` when no secondary path is
-   confirmed — respect that.
-2. **Alternative admin.** Disabling root login requires a named administrative
-   account and a working escalation path (sudo). If unknown, do not proceed.
-3. Always preview, show the exact directive change and the lockout warning, and
-   get explicit confirmation.
+Before a lockout-capable change:
+1. Identify the remote user and how they authenticate (when observable).
+2. Confirm an alternative administrative account and privilege escalation.
+3. Confirm a secondary management path and/or console access.
+   The engine refuses `PasswordAuthentication no` without a confirmed secondary
+   path — respect it.
 
-Mechanics (handled by the tool): back up `sshd_config`, edit one directive,
-`sshd -t`, reload (never restart), verify effective config (`sshd -T`) and that
-the service stays active; restore the backup automatically if `sshd -t` fails.
+Mechanics (by the tool): remote backup, `sshd -t`, reload (never restart),
+verify effective config (`sshd -T`) and that sshd stays active. If `sshd -t`
+fails the backup is restored.
 
-Never store or ask for credentials.
+Crucially: after applying, the tool opens a NEW SSH connection from the
+workstation. Only a successful reconnect means success; otherwise it attempts a
+rollback. Never store or ask for credentials.
