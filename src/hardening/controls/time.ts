@@ -18,8 +18,6 @@ export const timeControls: ControlDefinition[] = [
     id: "TIME-001",
     title: "System time is synchronized",
     category: "time",
-    phase: "foundational",
-    order: 10,
     platform: ["linux"],
     description: "The host clock should be synchronized by an NTP implementation.",
     rationale:

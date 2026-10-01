@@ -67,8 +67,6 @@ export const sshControls: ControlDefinition[] = [
     id: "SSH-001",
     title: "Disable SSH root login",
     category: "ssh",
-    phase: "access",
-    order: 20,
     platform: ["linux"],
     description: "Direct root login over SSH should be disabled in favour of named administrative accounts.",
     rationale:
@@ -102,8 +100,6 @@ export const sshControls: ControlDefinition[] = [
     id: "SSH-002",
     title: "Disable SSH password authentication",
     category: "ssh",
-    phase: "access",
-    order: 30,
     platform: ["linux"],
     description:
       "Interactive password authentication over SSH should be disabled when a verified alternative exists.",
@@ -149,8 +145,6 @@ export const sshControls: ControlDefinition[] = [
     id: "SSH-003",
     title: "Disable SSH empty passwords",
     category: "ssh",
-    phase: "access",
-    order: 10,
     platform: ["linux"],
     description: "SSH must never accept accounts with empty password fields.",
     rationale:
@@ -175,8 +169,6 @@ export const sshControls: ControlDefinition[] = [
     id: "SSH-004",
     title: "Disable SSH X11 forwarding",
     category: "ssh",
-    phase: "foundational",
-    order: 40,
     platform: ["linux"],
     description: "X11 forwarding should be disabled unless explicitly required.",
     rationale:
@@ -201,8 +193,6 @@ export const sshControls: ControlDefinition[] = [
     id: "SSH-005",
     title: "Limit SSH authentication attempts",
     category: "ssh",
-    phase: "foundational",
-    order: 30,
     platform: ["linux"],
     description: "MaxAuthTries should be bounded to slow down credential guessing.",
     rationale:
@@ -227,8 +217,6 @@ export const sshControls: ControlDefinition[] = [
     id: "SSH-006",
     title: "Restrict SSH access to management networks",
     category: "ssh",
-    phase: "network",
-    order: 20,
     platform: ["linux"],
     description: "SSH should be reachable only from declared administrative networks.",
     rationale:

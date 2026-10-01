@@ -15,7 +15,6 @@ import type { ControlDefinition } from "./types";
 interface KernelControlSpec {
   id: string;
   title: string;
-  order: number;
   setting: string;
   path: string;
   desiredState: string;
@@ -31,8 +30,6 @@ function kernelUnknownControl(spec: KernelControlSpec): ControlDefinition {
     id: spec.id,
     title: spec.title,
     category: "kernel",
-    phase: "foundational",
-    order: spec.order,
     platform: ["linux"],
     description: spec.description,
     rationale: spec.rationale,
@@ -62,7 +59,6 @@ export const kernelControls: ControlDefinition[] = [
   kernelUnknownControl({
     id: "KRN-001",
     title: "IP source routing is disabled",
-    order: 10,
     setting: "net.ipv4.conf.all.accept_source_route",
     path: "kernel.data.sysctl['net.ipv4.conf.all.accept_source_route']",
     desiredState: "net.ipv4.conf.all.accept_source_route=0",
@@ -76,7 +72,6 @@ export const kernelControls: ControlDefinition[] = [
   kernelUnknownControl({
     id: "KRN-002",
     title: "ICMP redirects are not accepted",
-    order: 20,
     setting: "net.ipv4.conf.all.accept_redirects",
     path: "kernel.data.sysctl['net.ipv4.conf.all.accept_redirects']",
     desiredState: "net.ipv4.conf.all.accept_redirects=0",
@@ -89,7 +84,6 @@ export const kernelControls: ControlDefinition[] = [
   kernelUnknownControl({
     id: "KRN-003",
     title: "Address space layout randomization is enabled",
-    order: 30,
     setting: "kernel.randomize_va_space",
     path: "kernel.data.sysctl['kernel.randomize_va_space']",
     desiredState: "kernel.randomize_va_space=2",
@@ -103,7 +97,6 @@ export const kernelControls: ControlDefinition[] = [
   kernelUnknownControl({
     id: "KRN-004",
     title: "Kernel pointer exposure and ptrace are restricted",
-    order: 40,
     setting: "kernel.kptr_restrict / kernel.yama.ptrace_scope",
     path: "kernel.data.sysctl['kernel.kptr_restrict']",
     desiredState: "kernel.kptr_restrict=1 and kernel.yama.ptrace_scope>=1",

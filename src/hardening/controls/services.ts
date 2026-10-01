@@ -38,8 +38,6 @@ export const serviceControls: ControlDefinition[] = [
     id: "SVC-001",
     title: "No known-insecure network services enabled",
     category: "services",
-    phase: "services",
-    order: 10,
     platform: ["linux"],
     description: "Services implementing plaintext or obsolete protocols should not be enabled.",
     rationale:
@@ -97,8 +95,6 @@ export const serviceControls: ControlDefinition[] = [
     id: "SVC-002",
     title: "Enabled services are reviewed against host role",
     category: "services",
-    phase: "services",
-    order: 20,
     platform: ["linux"],
     description: "The set of enabled services should be reconciled with the server's declared role.",
     rationale:

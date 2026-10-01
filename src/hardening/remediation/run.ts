@@ -1,28 +1,25 @@
 /**
- * Remediation orchestrator: preview / apply / verify / rollback.
- *
- * Enforces the safety gates in one place:
- * - only controls the plan marked `non-compliant` or `requires-review` apply;
+ * Remediation orchestrator: preview / apply / verify / rollback for the local
+ * host. Enforces the safety gates in one place:
+ * - only controls the assessment marked `non-compliant` or `requires-review`;
  * - manual-only controls never apply;
- * - root is required for changes that need it (no sudo escalation is performed);
- * - every change is verified (not just exit-code checked) and recorded under
- *   state/<server-id>/{changes,verification,rollbacks}/ with its backups.
+ * - root is required where the change needs it (no sudo escalation);
+ * - every apply/rollback is verified and recorded in `.server-hardener/last-run.json`.
  */
 
-import { PlanningError } from "../errors";
+import { AssessmentError } from "../errors";
 import { type CommandRunner, ExecCommandRunner } from "../exec";
-import type { HardeningPlan, OperationalContext, ServerInventory, VerificationResult } from "../models";
-import {
-  loadRollback,
-  newChangeId,
-  newRollbackId,
-  readLatestChange,
-  saveChange,
-  saveRollback,
-  saveVerification,
-} from "../state";
+import type {
+  EvaluatedControl,
+  LastRunEntry,
+  OperationalContext,
+  ServerInventory,
+  VerificationResult,
+} from "../models";
+import { appendLastRun, readLastRun } from "../store";
 import { getRemediation } from "./registry";
 import {
+  type AppliedChange,
   defaultSystemPaths,
   type RemediationApplyResult,
   type RemediationContext,
@@ -33,12 +30,10 @@ import {
 const APPLICABLE_STATUSES = new Set(["non-compliant", "requires-review"]);
 
 export interface ExecuteRequest {
-  stateRoot: string;
-  serverId: string;
+  storeRoot: string;
   inventory: ServerInventory;
   context: OperationalContext;
-  plan: HardeningPlan;
-  controlId: string;
+  control: EvaluatedControl;
   target?: string;
   runner?: CommandRunner;
   paths?: SystemPaths;
@@ -53,8 +48,6 @@ export interface ExecutionOutcome {
   changed: boolean;
   message: string;
   verification: VerificationResult | null;
-  changeId: string | null;
-  rollbackId: string | null;
   backupIds: string[];
   preview: RemediationPreview | null;
 }
@@ -64,17 +57,11 @@ function isRoot(): boolean {
 }
 
 function buildContext(request: ExecuteRequest): RemediationContext {
-  const control = request.plan.controls.find((c) => c.controlId === request.controlId);
-  if (!control) {
-    throw new PlanningError(`control ${request.controlId} is not part of plan ${request.plan.planId}`);
-  }
   const context: RemediationContext = {
-    serverId: request.serverId,
     inventory: request.inventory,
     context: request.context,
-    plan: request.plan,
-    control,
-    stateRoot: request.stateRoot,
+    control: request.control,
+    storeRoot: request.storeRoot,
     runner: request.runner ?? new ExecCommandRunner({ timeoutMs: 120_000, maxOutputBytes: 4 * 1024 * 1024 }),
     paths: request.paths ?? defaultSystemPaths(),
     hasRoot: request.hasRoot ?? isRoot(),
@@ -86,8 +73,7 @@ function buildContext(request: ExecuteRequest): RemediationContext {
 
 export async function previewControl(request: ExecuteRequest): Promise<ExecutionOutcome> {
   const ctx = buildContext(request);
-  const remediation = getRemediation(ctx.control.controlId);
-  const preview = await remediation.preview(ctx);
+  const preview = await getRemediation(ctx.control.controlId).preview(ctx);
   return {
     action: "preview",
     controlId: ctx.control.controlId,
@@ -95,8 +81,6 @@ export async function previewControl(request: ExecuteRequest): Promise<Execution
     changed: false,
     message: preview.manual ? `manual remediation required: ${preview.manualReason}` : "preview ready",
     verification: null,
-    changeId: null,
-    rollbackId: null,
     backupIds: [],
     preview,
   };
@@ -112,52 +96,18 @@ export async function applyControl(request: ExecuteRequest): Promise<ExecutionOu
   if (!APPLICABLE_STATUSES.has(ctx.control.status)) {
     return refused(
       ctx,
-      `refusing to apply ${ctx.control.controlId}: plan status is "${ctx.control.status}" (only non-compliant or requires-review may be applied)`,
+      `refusing to apply ${ctx.control.controlId}: status is "${ctx.control.status}" (only non-compliant or requires-review can be applied)`,
     );
   }
   if (remediation.requiresRoot && !ctx.hasRoot) {
     return refused(
       ctx,
-      "insufficient permissions: applying changes requires root. Run OpenCode as root; no sudo escalation is performed.",
+      "this change needs administrative privileges. Run OpenCode with the appropriate privileges (no sudo escalation is performed).",
     );
   }
 
   const result = await remediation.apply(ctx);
-  const verificationId = result.verification.verificationId;
-  await saveVerification(request.stateRoot, result.verification);
-
-  const reversible = result.reversible && result.strategy !== null;
-  const rollbackId = reversible && result.changed ? newRollbackId() : null;
-  const changeId = newChangeId();
-  const timestamp = ctx.now();
-
-  if (rollbackId) {
-    await saveRollback(request.stateRoot, {
-      schemaVersion: 1,
-      rollbackId,
-      changeId,
-      serverId: request.serverId,
-      timestamp,
-      available: true,
-      strategy: result.strategy,
-      artifacts: result.backupIds,
-      verificationId,
-    });
-  }
-
-  await saveChange(request.stateRoot, {
-    schemaVersion: 1,
-    changeId,
-    controlId: ctx.control.controlId,
-    serverId: request.serverId,
-    timestamp,
-    target: result.target,
-    before: result.before,
-    after: result.after,
-    result: changeResult(result),
-    verificationId,
-    rollbackId,
-  });
+  await record(ctx, "apply", result);
 
   return {
     action: "apply",
@@ -166,8 +116,6 @@ export async function applyControl(request: ExecuteRequest): Promise<ExecutionOu
     changed: result.changed,
     message: result.message,
     verification: result.verification,
-    changeId,
-    rollbackId,
     backupIds: result.backupIds,
     preview: null,
   };
@@ -175,9 +123,7 @@ export async function applyControl(request: ExecuteRequest): Promise<ExecutionOu
 
 export async function verifyControl(request: ExecuteRequest): Promise<ExecutionOutcome> {
   const ctx = buildContext(request);
-  const remediation = getRemediation(ctx.control.controlId);
-  const verification = await remediation.verify(ctx);
-  await saveVerification(request.stateRoot, verification);
+  const verification = await getRemediation(ctx.control.controlId).verify(ctx);
   return {
     action: "verify",
     controlId: ctx.control.controlId,
@@ -185,8 +131,6 @@ export async function verifyControl(request: ExecuteRequest): Promise<ExecutionO
     changed: false,
     message: verification.passed === true ? "verification passed" : "verification did not pass",
     verification,
-    changeId: null,
-    rollbackId: null,
     backupIds: [],
     preview: null,
   };
@@ -195,41 +139,24 @@ export async function verifyControl(request: ExecuteRequest): Promise<ExecutionO
 export async function rollbackControl(request: ExecuteRequest): Promise<ExecutionOutcome> {
   const ctx = buildContext(request);
   const remediation = getRemediation(ctx.control.controlId);
-  const change = await readLatestChange(request.stateRoot, request.serverId, ctx.control.controlId);
-  if (!change) {
+  const previous = await lastAppliedChange(ctx.storeRoot, ctx.control.controlId);
+  if (!previous) {
     return refused(ctx, `no applied change found for ${ctx.control.controlId}`);
   }
   if (remediation.manual) {
     return refused(ctx, `manual rollback required: ${remediation.manualReason}`);
   }
   if (remediation.requiresRoot && !ctx.hasRoot) {
-    return refused(ctx, "insufficient permissions: rollback requires root");
-  }
-  if (!change.rollbackId) {
-    return refused(ctx, "manual rollback required: no automatic rollback was recorded");
-  }
-  const rollback = await loadRollback(request.stateRoot, request.serverId, change.rollbackId);
-  if (!rollback.available) {
-    return refused(ctx, "manual rollback required: the recorded rollback is not available");
+    return refused(ctx, "rollback needs administrative privileges.");
   }
 
-  const result = await remediation.rollback(ctx, change, rollback);
-  await saveVerification(request.stateRoot, result.verification);
-  const changeId = newChangeId();
-  await saveChange(request.stateRoot, {
-    schemaVersion: 1,
-    changeId,
-    controlId: ctx.control.controlId,
-    serverId: request.serverId,
-    timestamp: ctx.now(),
-    target: result.target,
-    before: change.after,
-    after: change.before,
-    result: "rolled-back",
-    verificationId: result.verification.verificationId,
-    rollbackId: change.rollbackId,
-  });
-
+  let result: RemediationApplyResult;
+  try {
+    result = await remediation.rollback(ctx, previous.change);
+  } catch (err) {
+    return refused(ctx, `rollback failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  await record(ctx, "rollback", result);
   return {
     action: "rollback",
     controlId: ctx.control.controlId,
@@ -237,20 +164,70 @@ export async function rollbackControl(request: ExecuteRequest): Promise<Executio
     changed: result.changed,
     message: result.message,
     verification: result.verification,
-    changeId,
-    rollbackId: change.rollbackId,
     backupIds: result.backupIds,
     preview: null,
   };
 }
 
-function changeResult(result: RemediationApplyResult): "applied" | "failed" | "skipped" {
+async function lastAppliedChange(
+  storeRoot: string,
+  controlId: string,
+): Promise<{ change: AppliedChange } | null> {
+  const run = await readLastRun(storeRoot);
+  if (!run) return null;
+  const entry = [...run.entries].reverse().find((e) => e.controlId === controlId && e.action === "apply");
+  if (!entry || entry.result === "manual") return null;
+  return {
+    change: {
+      controlId: entry.controlId,
+      target: entry.target,
+      before: entry.before,
+      after: entry.after,
+      backupIds: entry.backupIds,
+    },
+  };
+}
+
+async function record(
+  ctx: RemediationContext,
+  action: "apply" | "rollback",
+  result: RemediationApplyResult,
+): Promise<void> {
+  const entry: LastRunEntry = {
+    at: ctx.now(),
+    controlId: ctx.control.controlId,
+    action,
+    target: result.target,
+    result: entryResult(action, result),
+    changed: result.changed,
+    message: result.message,
+    before: result.before,
+    after: result.after,
+    verification: result.verification
+      ? {
+          check: result.verification.check,
+          expected: result.verification.expected,
+          observed: result.verification.observed,
+          passed: result.verification.passed,
+        }
+      : null,
+    backupIds: result.backupIds,
+  };
+  await appendLastRun(ctx.storeRoot, entry, {
+    hostname: ctx.inventory.identity.data?.hostname ?? null,
+    evaluated: 1,
+  });
+}
+
+function entryResult(action: "apply" | "rollback", result: RemediationApplyResult): LastRunEntry["result"] {
+  if (action === "rollback") return result.changed ? "rolled-back" : "failed";
   if (result.changed && result.verification.passed === true) return "applied";
   if (!result.changed && result.verification.passed === true) return "skipped";
   return "failed";
 }
 
 function refused(ctx: RemediationContext, message: string): ExecutionOutcome {
+  void ctx;
   return {
     action: "apply",
     controlId: ctx.control.controlId,
@@ -258,9 +235,13 @@ function refused(ctx: RemediationContext, message: string): ExecutionOutcome {
     changed: false,
     message,
     verification: null,
-    changeId: null,
-    rollbackId: null,
     backupIds: [],
     preview: null,
   };
+}
+
+/** Ensure a control id is part of the catalog (guards tool inputs). */
+export function assertKnownControl(control: EvaluatedControl | undefined): EvaluatedControl {
+  if (!control) throw new AssessmentError("unknown control");
+  return control;
 }

@@ -7,12 +7,9 @@
  */
 import type { CommandRunner } from "../exec";
 import type {
-  ChangeRecord,
-  HardeningPlan,
+  EvaluatedControl,
   OperationalContext,
-  PlannedControl,
   RiskAssessment,
-  RollbackRecord,
   ServerInventory,
   VerificationResult,
 } from "../models";
@@ -35,12 +32,10 @@ export function defaultSystemPaths(): SystemPaths {
 }
 
 export interface RemediationContext {
-  serverId: string;
   inventory: ServerInventory;
   context: OperationalContext;
-  plan: HardeningPlan;
-  control: PlannedControl;
-  stateRoot: string;
+  control: EvaluatedControl;
+  storeRoot: string;
   runner: CommandRunner;
   paths: SystemPaths;
   hasRoot: boolean;
@@ -72,7 +67,7 @@ export interface RemediationPreview {
 export interface RemediationApplyResult {
   changed: boolean;
   target: string;
-  /** JSON string capturing state before/after, for the ChangeRecord. */
+  /** JSON string capturing state before/after, recorded in last-run.json. */
   before: string | null;
   after: string | null;
   backupIds: string[];
@@ -80,6 +75,15 @@ export interface RemediationApplyResult {
   strategy: string | null;
   reversible: boolean;
   message: string;
+}
+
+/** The previously applied change for a control, used to roll it back. */
+export interface AppliedChange {
+  controlId: string;
+  target: string;
+  before: string | null;
+  after: string | null;
+  backupIds: string[];
 }
 
 export interface Remediation {
@@ -90,61 +94,46 @@ export interface Remediation {
   preview: (ctx: RemediationContext) => Promise<RemediationPreview>;
   apply: (ctx: RemediationContext) => Promise<RemediationApplyResult>;
   verify: (ctx: RemediationContext) => Promise<VerificationResult>;
-  rollback: (
-    ctx: RemediationContext,
-    change: ChangeRecord,
-    rollback: RollbackRecord,
-  ) => Promise<RemediationApplyResult>;
+  rollback: (ctx: RemediationContext, previous: AppliedChange) => Promise<RemediationApplyResult>;
 }
 
 /** Build a manual-only remediation placeholder (no automatic change). */
 export function manualRemediation(controlId: string, reason: string): Remediation {
-  const manualPreview = async (ctx: RemediationContext): Promise<RemediationPreview> => ({
-    controlId,
-    title: ctx.control.title,
-    manual: true,
-    manualReason: reason,
-    currentState: ctx.control.currentState,
-    desiredState: ctx.control.desiredState,
-    steps: [`manual remediation required: ${reason}`],
-    files: [],
-    commands: [],
-    warnings: [],
-    risk: ctx.control.risk,
-    requiresRoot: false,
-  });
   return {
     controlId,
     requiresRoot: false,
     manual: true,
     manualReason: reason,
-    preview: manualPreview,
+    preview: async (ctx) => ({
+      controlId,
+      title: ctx.control.title,
+      manual: true,
+      manualReason: reason,
+      currentState: ctx.control.currentState,
+      desiredState: ctx.control.desiredState,
+      steps: [`manual remediation required: ${reason}`],
+      files: [],
+      commands: [],
+      warnings: [],
+      risk: ctx.control.risk,
+      requiresRoot: false,
+    }),
     apply: async () => {
       throw new Error(`control ${controlId} requires manual remediation: ${reason}`);
     },
-    verify: async (ctx) => manualVerification(ctx, controlId, reason),
+    verify: async (ctx) => ({
+      verificationId: `ver-manual-${controlId.toLowerCase()}`,
+      timestamp: ctx.now(),
+      target: controlId,
+      check: "manual remediation required",
+      expected: ctx.control.desiredState,
+      observed: null,
+      passed: null,
+      evidence: [reason],
+      error: null,
+    }),
     rollback: async () => {
       throw new Error(`control ${controlId} has no automatic rollback: ${reason}`);
     },
-  };
-}
-
-async function manualVerification(
-  ctx: RemediationContext,
-  controlId: string,
-  reason: string,
-): Promise<VerificationResult> {
-  return {
-    schemaVersion: 1,
-    verificationId: `ver-${controlId.toLowerCase()}-manual`,
-    serverId: ctx.serverId,
-    timestamp: ctx.now(),
-    target: controlId,
-    check: "manual remediation required",
-    expected: ctx.control.desiredState,
-    observed: null,
-    passed: null,
-    evidence: [reason],
-    error: null,
   };
 }

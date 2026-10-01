@@ -1,23 +1,108 @@
 /**
- * Execution test helpers: a mutable fake runner, a temporary system tree
- * (sshd_config, sysctl drop-in dir, fstab) and a generated plan.
- *
- * Nothing here touches the real host.
+ * Shared test support: sample inventory/context, catalog lookup and a stateful
+ * fake command runner with a temporary system tree. Nothing touches the real host.
  */
 import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { getControl } from "../src/hardening/controls/catalog";
+import type { ControlDefinition } from "../src/hardening/controls/types";
 import type { CommandOutcome, CommandRunner } from "../src/hardening/exec";
+import { runDiscovery } from "../src/hardening/inventory";
 import type {
-  HardeningPlan,
+  EvaluatedControl,
   OperationalContext,
-  PlannedControl,
   ServerInventory,
+  ServerRole,
 } from "../src/hardening/models";
-import { generatePlan } from "../src/hardening/planning/plan";
+import { emptyContext } from "../src/hardening/planning/context";
+import { evaluateControl } from "../src/hardening/planning/evaluate";
 import type { SystemPaths } from "../src/hardening/remediation/types";
-import { NOW, sampleContext, sampleInventory } from "./planning-helpers";
+import { successfulScenario } from "./helpers";
+
+export const NOW = "2025-03-04T05:06:07.000Z";
+
+export function clone<T>(value: T): T {
+  return structuredClone(value);
+}
+
+export async function sampleInventory(): Promise<ServerInventory> {
+  const { runner, files } = successfulScenario();
+  return runDiscovery({ runner, files, now: () => NOW, platform: "linux" });
+}
+
+export function mustControl(controlId: string): ControlDefinition {
+  const control = getControl(controlId);
+  if (!control) throw new Error(`control ${controlId} not found in catalog`);
+  return control;
+}
+
+export function evaluate(
+  controlId: string,
+  inventory: ServerInventory,
+  context: OperationalContext,
+): EvaluatedControl {
+  return evaluateControl(mustControl(controlId), inventory, context);
+}
+
+export interface SampleContextOptions {
+  environment?: OperationalContext["environment"];
+  internetExposure?: OperationalContext["internetExposure"];
+  secondaryPathConfirmed?: boolean | null;
+  consoleAccess?: boolean | null;
+  confirmedRoles?: ServerRole[];
+}
+
+export function sampleContext(options: SampleContextOptions = {}): OperationalContext {
+  const base = emptyContext(NOW);
+  return {
+    ...base,
+    environment: options.environment ?? "production",
+    criticality: "high",
+    internetExposure: options.internetExposure ?? "none",
+    roles: (options.confirmedRoles ?? ["generic-server"]).map((role) => ({
+      role,
+      confidence: "confirmed" as const,
+      source: "test",
+    })),
+    management: {
+      methods: ["ssh"],
+      secondaryPathConfirmed:
+        options.secondaryPathConfirmed === undefined ? true : options.secondaryPathConfirmed,
+      consoleAccess: options.consoleAccess === undefined ? true : options.consoleAccess,
+    },
+    networks: { administrative: ["10.0.0.0/8"], service: ["10.0.0.0/8"] },
+    reboot: { allowed: true, maintenanceWindowAvailable: true },
+    highAvailability: false,
+    operatorNotes: null,
+  };
+}
+
+export function withoutAdministrativeUsers(inventory: ServerInventory): ServerInventory {
+  const copy = clone(inventory);
+  if (copy.users.data) {
+    copy.users.data.users = copy.users.data.users.map((user) =>
+      user.uid === 0 ? user : { ...user, supplementaryGroups: [], primaryGroup: "users" },
+    );
+    copy.users.data.groups = copy.users.data.groups.map((group) => ({ ...group, members: [] }));
+  }
+  if (copy.privilegedAccess.data) copy.privilegedAccess.data.administrativeGroups = [];
+  return copy;
+}
+
+export function withUnknownLockState(inventory: ServerInventory): ServerInventory {
+  const copy = clone(inventory);
+  if (copy.users.data) {
+    copy.users.data.users = copy.users.data.users.map((user) => ({
+      ...user,
+      locked: { value: null, confidence: "unknown" as const, source: "/etc/shadow", collectedAt: NOW },
+    }));
+  }
+  return copy;
+}
+
+// --- Stateful fake runner + temp system tree -------------------------------
 
 const SSHD_DEFAULTS: Record<string, string> = {
   permitrootlogin: "yes",
@@ -42,7 +127,6 @@ interface ServiceState {
   active: boolean;
 }
 
-/** A stateful fake runner: sysctl values, sshd config and systemd units change. */
 export class MutableRunner implements CommandRunner {
   readonly sysctl = new Map<string, string>();
   readonly services = new Map<string, ServiceState>();
@@ -90,12 +174,10 @@ export class MutableRunner implements CommandRunner {
       const now = args.includes("--now");
       const unit = args[args.length - 1] ?? "";
       const state = this.services.get(unit);
-      if (sub === "is-active") {
+      if (sub === "is-active")
         return Promise.resolve(state ? ok(state.active ? "active" : "inactive") : unavailable());
-      }
-      if (sub === "is-enabled") {
+      if (sub === "is-enabled")
         return Promise.resolve(state ? ok(state.enabled ? "enabled" : "disabled") : unavailable());
-      }
       if (sub === "disable" || sub === "stop") {
         if (state) {
           if (sub === "disable" || now) state.enabled = false;
@@ -134,12 +216,11 @@ export class MutableRunner implements CommandRunner {
 
 export interface ExecEnv {
   dir: string;
-  stateRoot: string;
+  storeRoot: string;
   paths: SystemPaths;
   runner: MutableRunner;
   inventory: ServerInventory;
   context: OperationalContext;
-  plan: HardeningPlan;
 }
 
 export async function makeExecEnv(): Promise<ExecEnv> {
@@ -162,25 +243,16 @@ export async function makeExecEnv(): Promise<ExecEnv> {
   runner.services.set("ssh.service", { enabled: true, active: true });
   runner.sysctl.set("kernel.randomize_va_space", "0");
 
-  const inventory = await sampleInventory();
-  const context = sampleContext();
-  const plan = generatePlan({ inventory, context, now: () => NOW, planId: "plan-0123456789abcdef" });
-  return { dir, stateRoot: path.join(dir, "state"), paths, runner, inventory, context, plan };
+  return {
+    dir,
+    storeRoot: path.join(dir, ".server-hardener"),
+    paths,
+    runner,
+    inventory: await sampleInventory(),
+    context: sampleContext(),
+  };
 }
 
 export async function cleanupExecEnv(env: ExecEnv): Promise<void> {
   await rm(env.dir, { recursive: true, force: true });
-}
-
-/** Return a plan copy with one control forced to a given status. */
-export function withStatus(
-  plan: HardeningPlan,
-  controlId: string,
-  status: PlannedControl["status"],
-): HardeningPlan {
-  const copy = structuredClone(plan);
-  const control = copy.controls.find((c) => c.controlId === controlId);
-  if (!control) throw new Error(`control ${controlId} not in plan`);
-  control.status = status;
-  return copy;
 }

@@ -74,8 +74,6 @@ export const filesystemControls: ControlDefinition[] = [
     id: "FS-001",
     title: "Temporary directory uses hardening mount options",
     category: "filesystem",
-    phase: "disruptive",
-    order: 10,
     platform: ["linux"],
     description: "/tmp should be a separate mount with nodev and nosuid.",
     rationale:
@@ -103,8 +101,6 @@ export const filesystemControls: ControlDefinition[] = [
     id: "FS-002",
     title: "Persistent temporary directory uses hardening mount options",
     category: "filesystem",
-    phase: "disruptive",
-    order: 20,
     platform: ["linux"],
     description: "/var/tmp should be a separate mount with nodev and nosuid.",
     rationale:
@@ -132,8 +128,6 @@ export const filesystemControls: ControlDefinition[] = [
     id: "FS-003",
     title: "Writable system paths use separate mounts",
     category: "filesystem",
-    phase: "disruptive",
-    order: 30,
     platform: ["linux"],
     description: "Sensitive writable paths should not share the root filesystem.",
     rationale:
@@ -174,8 +168,6 @@ export const filesystemControls: ControlDefinition[] = [
     id: "FS-004",
     title: "noexec is considered for writable data locations",
     category: "filesystem",
-    phase: "disruptive",
-    order: 40,
     platform: ["linux"],
     description: "noexec on writable locations should be evaluated against what runs there.",
     rationale:

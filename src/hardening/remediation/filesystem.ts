@@ -5,11 +5,17 @@
  * warns that a remount (or reboot) is required for the change to take effect.
  * Mountpoints that are not present in fstab are left for manual work.
  */
-import type { ChangeRecord, VerificationResult } from "../models";
-import { newVerificationId } from "../state";
+import type { VerificationResult } from "../models";
+import { newVerificationId } from "../store";
 import { readFstabOptions, setFstabOptions } from "./config";
 import { createBackup, readTextOrNull, restoreBackup, writeTextAtomic } from "./fsops";
-import type { Remediation, RemediationApplyResult, RemediationContext, RemediationPreview } from "./types";
+import type {
+  AppliedChange,
+  Remediation,
+  RemediationApplyResult,
+  RemediationContext,
+  RemediationPreview,
+} from "./types";
 
 const FS_CONTROLS: Record<string, { mountpoint: string; options: string[] }> = {
   "FS-001": { mountpoint: "/tmp", options: ["nodev", "nosuid"] },
@@ -70,9 +76,7 @@ async function verify(ctx: RemediationContext): Promise<VerificationResult> {
   const missing = current.options.filter((o) => !(options ?? []).includes(o));
   const passed = options !== null && missing.length === 0;
   return {
-    schemaVersion: 1,
     verificationId: newVerificationId(),
-    serverId: ctx.serverId,
     timestamp: ctx.now(),
     target: ctx.paths.fstab,
     check: "fstab entry has the required mount options",
@@ -122,10 +126,10 @@ function desiredOptions(previous: string[] | null, add: string[]): string[] {
   return [...new Set([...(previous ?? []), ...add])];
 }
 
-async function rollback(ctx: RemediationContext, change: ChangeRecord): Promise<RemediationApplyResult> {
+async function rollback(ctx: RemediationContext, change: AppliedChange): Promise<RemediationApplyResult> {
   const before = JSON.parse(change.before ?? "{}") as { backupId?: string };
   if (!before.backupId) return refused(ctx, "no fstab backup recorded; manual rollback required");
-  await restoreBackup(ctx.stateRoot, ctx.serverId, before.backupId);
+  await restoreBackup(ctx.storeRoot, before.backupId);
   return {
     changed: true,
     target: ctx.paths.fstab,
@@ -147,9 +151,7 @@ function refused(ctx: RemediationContext, reason: string): RemediationApplyResul
     after: null,
     backupIds: [],
     verification: {
-      schemaVersion: 1,
       verificationId: newVerificationId(),
-      serverId: ctx.serverId,
       timestamp: ctx.now(),
       target: ctx.control.controlId,
       check: "apply refused",

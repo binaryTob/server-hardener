@@ -5,7 +5,6 @@
  */
 import { describe, expect, test } from "bun:test";
 import { runDiscovery, summarizeInventory } from "../src/hardening/inventory";
-import { deriveServerId } from "../src/hardening/state";
 import { validateServerInventory } from "../src/hardening/validation";
 import {
   denied,
@@ -35,12 +34,8 @@ describe("complete inventory", () => {
     const { runner, files } = successfulScenario();
     const inventory = await discovery(runner, files);
 
-    expect(inventory.schemaVersion).toBe(1);
     expect(() => validateServerInventory(inventory)).not.toThrow();
     expect(inventory.generatedAt).toBe(NOW);
-
-    const expectedId = deriveServerId({ machineId: MACHINE_ID, hostname: "srv-01" }).serverId;
-    expect(inventory.serverId).toBe(expectedId);
 
     // Identity & OS
     expect(inventory.identity.status).toBe("success");
@@ -151,7 +146,7 @@ describe("complete inventory", () => {
     const { runner, files } = successfulScenario();
     const inventory = await discovery(runner, files);
     const summary = summarizeInventory(inventory);
-    expect(summary.serverId).toBe(inventory.serverId);
+    expect(summary.hostname).toBe("srv-01");
     expect(summary.counts.interfaces).toBe(3);
     expect(summary.counts.users).toBe(4);
     expect(summary.counts.packages).toBe(5);

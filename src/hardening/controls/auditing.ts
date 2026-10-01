@@ -18,8 +18,6 @@ export const auditingControls: ControlDefinition[] = [
     id: "AUD-001",
     title: "Audit subsystem is available",
     category: "auditing",
-    phase: "logging-visibility",
-    order: 40,
     platform: ["linux"],
     description: "The kernel audit subsystem (auditd) should be installed/available.",
     rationale:
@@ -63,8 +61,6 @@ export const auditingControls: ControlDefinition[] = [
     id: "AUD-002",
     title: "Audit subsystem is active",
     category: "auditing",
-    phase: "logging-visibility",
-    order: 50,
     platform: ["linux"],
     description: "If the audit subsystem is present, it should be running.",
     rationale:

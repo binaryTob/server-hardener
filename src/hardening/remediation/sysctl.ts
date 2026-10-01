@@ -7,10 +7,16 @@
  * Detects conflicting settings in other sysctl files before writing.
  */
 import type { VerificationResult } from "../models";
-import { newVerificationId } from "../state";
+import { newVerificationId } from "../store";
 import { buildManagedSysctlFile, removeManagedSysctlBlock, type SysctlEntry } from "./config";
 import { createBackup, deleteFile, listDir, readTextOrNull, restoreBackup, writeTextAtomic } from "./fsops";
-import type { Remediation, RemediationApplyResult, RemediationContext, RemediationPreview } from "./types";
+import type {
+  AppliedChange,
+  Remediation,
+  RemediationApplyResult,
+  RemediationContext,
+  RemediationPreview,
+} from "./types";
 
 interface SysctlSpec {
   entries: SysctlEntry[];
@@ -137,9 +143,7 @@ async function verify(ctx: RemediationContext): Promise<VerificationResult> {
     checks.push(`${entry.key}=${value ?? "?"} (expected ${entry.value})`);
   }
   return {
-    schemaVersion: 1,
     verificationId: newVerificationId(),
-    serverId: ctx.serverId,
     timestamp: ctx.now(),
     target: ctx.control.controlId,
     check: "runtime sysctl values match desired state",
@@ -196,16 +200,13 @@ async function apply(ctx: RemediationContext): Promise<RemediationApplyResult> {
   };
 }
 
-async function rollback(
-  ctx: RemediationContext,
-  change: import("../models").ChangeRecord,
-): Promise<RemediationApplyResult> {
+async function rollback(ctx: RemediationContext, change: AppliedChange): Promise<RemediationApplyResult> {
   const before = JSON.parse(change.before ?? "{}") as {
     values?: Record<string, string | null>;
     managedFileBackupId?: string | null;
   };
   if (before.managedFileBackupId) {
-    await restoreBackup(ctx.stateRoot, ctx.serverId, before.managedFileBackupId);
+    await restoreBackup(ctx.storeRoot, before.managedFileBackupId);
   } else {
     const existing = await readTextOrNull(ctx.paths.sysctlManagedFile);
     const { content } = removeManagedSysctlBlock(existing);

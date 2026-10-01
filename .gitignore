@@ -1,9 +1,7 @@
 node_modules/
 dist/
 biome.jsonc
-# Persisted state contains host inventory data (users, sockets, packages).
-# Keep directory structure only.
-state/*
-!state/.gitkeep
+# Local agent state: backups, last-run and optional context for THIS host.
+.server-hardener/
 *.log
 .DS_Store

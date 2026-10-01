@@ -21,8 +21,6 @@ export const privilegedAccessControls: ControlDefinition[] = [
     id: "PA-001",
     title: "Administrative group membership is reviewed",
     category: "privileged-access",
-    phase: "identity",
-    order: 30,
     platform: ["linux"],
     description: "Every non-root account with administrative group membership should be accounted for.",
     rationale:
@@ -74,8 +72,6 @@ export const privilegedAccessControls: ControlDefinition[] = [
     id: "PA-002",
     title: "Administrative accounts are not abandoned",
     category: "privileged-access",
-    phase: "identity",
-    order: 40,
     platform: ["linux"],
     description: "Administrative accounts should not be left locked/disabled without review.",
     rationale:
@@ -144,8 +140,6 @@ export const privilegedAccessControls: ControlDefinition[] = [
     id: "PA-003",
     title: "Privilege escalation path is documented",
     category: "privileged-access",
-    phase: "identity",
-    order: 50,
     platform: ["linux"],
     description: "The available privilege escalation mechanism should be known and recorded.",
     rationale:

@@ -24,8 +24,6 @@ export const networkControls: ControlDefinition[] = [
     id: "NET-001",
     title: "Wildcard listeners are intentionally exposed",
     category: "network",
-    phase: "network",
-    order: 50,
     platform: ["linux"],
     description: "Services listening on all interfaces should be intentional.",
     rationale:
@@ -81,8 +79,6 @@ export const networkControls: ControlDefinition[] = [
     id: "NET-002",
     title: "No plaintext management protocols listening",
     category: "network",
-    phase: "network",
-    order: 60,
     platform: ["linux"],
     description: "Ports associated with plaintext protocols should not be listening.",
     rationale:

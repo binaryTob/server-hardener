@@ -22,8 +22,6 @@ export const firewallControls: ControlDefinition[] = [
     id: "FW-001",
     title: "Host firewall is active",
     category: "firewall",
-    phase: "network",
-    order: 30,
     platform: ["linux"],
     description: "An enabled host firewall should be actively filtering traffic.",
     rationale:
@@ -100,8 +98,6 @@ export const firewallControls: ControlDefinition[] = [
     id: "FW-002",
     title: "Host firewall implementation is present",
     category: "firewall",
-    phase: "network",
-    order: 40,
     platform: ["linux"],
     description: "Some host firewall implementation should be available on the server.",
     rationale:
@@ -155,8 +151,6 @@ export const firewallControls: ControlDefinition[] = [
     id: "FW-003",
     title: "Management interfaces are restricted to management networks",
     category: "firewall",
-    phase: "network",
-    order: 10,
     platform: ["linux"],
     description: "Administrative services should be reachable only from authorised networks.",
     rationale:

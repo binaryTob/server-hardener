@@ -27,8 +27,6 @@ export const containerControls: ControlDefinition[] = [
     id: "CTN-001",
     title: "Docker TCP API is not exposed unauthenticated",
     category: "containers",
-    phase: "network",
-    order: 70,
     platform: ["linux"],
     description: "The Docker API must not listen on an unauthenticated TCP port.",
     rationale:
@@ -91,8 +89,6 @@ export const containerControls: ControlDefinition[] = [
     id: "CTN-002",
     title: "Kubernetes control-plane APIs are not on wildcard addresses",
     category: "containers",
-    phase: "network",
-    order: 80,
     platform: ["linux"],
     description: "The Kubernetes API and kubelet should not be exposed on all interfaces.",
     rationale:
@@ -154,8 +150,6 @@ export const containerControls: ControlDefinition[] = [
     id: "CTN-003",
     title: "Container runtime isolation is configured",
     category: "containers",
-    phase: "disruptive",
-    order: 90,
     platform: ["linux"],
     description: "Container runtime isolation (rootless, userns, seccomp) should be configured.",
     rationale:

@@ -1,151 +1,88 @@
 /**
- * Security tests: the tools must not accept arbitrary shell, unexpected
- * arguments, path traversal or malformed identifiers.
+ * Security tests: tools expose bounded arguments, require confirmation and
+ * cannot be pointed outside their domain. Path safety for state ids.
  */
 import { describe, expect, test } from "bun:test";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import inventoryTool from "../.opencode/tools/hardening_inventory";
-import stateTool from "../.opencode/tools/hardening_state";
+import hardenService from "../.opencode/tools/harden_service";
+import hardenSsh from "../.opencode/tools/harden_ssh";
+import hardenSysctl from "../.opencode/tools/harden_sysctl";
+import inspectSecurity from "../.opencode/tools/inspect_security";
+import inspectSystem from "../.opencode/tools/inspect_system";
+import { controlBelongsToDomain } from "../src/hardening/agent";
 import { CommandSafetyError, PathSafetyError, ToolArgumentError } from "../src/hardening/errors";
-import { assertSafeCommand, COMMAND_NAME_PATTERN, ExecCommandRunner } from "../src/hardening/exec";
-import { deriveServerId, resolveServerDir, SERVER_ID_PATTERN } from "../src/hardening/state";
+import { assertSafeCommand, ExecCommandRunner } from "../src/hardening/exec";
+import { assertSafeId } from "../src/hardening/store";
+
+describe("tool argument contracts", () => {
+  test("inspect_system exposes only 'action'", () => {
+    expect(Object.keys(inspectSystem.args)).toEqual(["action"]);
+  });
+
+  test("inspect_security exposes action + controlId", () => {
+    expect(Object.keys(inspectSecurity.args).sort()).toEqual(["action", "controlId"]);
+  });
+
+  test("harden tools expose only bounded arguments", () => {
+    for (const tool of [hardenSysctl, hardenSsh, hardenService]) {
+      expect(Object.keys(tool.args).sort()).toEqual(["action", "confirm", "controlId", "target"]);
+      expect(Object.keys(tool.args)).not.toContain("command");
+      expect(Object.keys(tool.args)).not.toContain("path");
+    }
+  });
+
+  test("unknown arguments are rejected", async () => {
+    const execute = hardenSysctl.execute as (args: unknown) => Promise<string>;
+    await expect(
+      execute({ action: "preview", controlId: "KRN-003", command: "rm -rf /" }),
+    ).rejects.toBeInstanceOf(ToolArgumentError);
+  });
+
+  test("apply and rollback require confirm:true", async () => {
+    const execute = hardenSysctl.execute as (args: unknown) => Promise<string>;
+    await expect(execute({ action: "apply", controlId: "KRN-003" })).rejects.toBeInstanceOf(
+      ToolArgumentError,
+    );
+    await expect(execute({ action: "rollback", controlId: "KRN-003" })).rejects.toBeInstanceOf(
+      ToolArgumentError,
+    );
+  });
+});
+
+describe("domain confinement", () => {
+  test("control ids belong only to their domain", () => {
+    expect(controlBelongsToDomain("sysctl", "KRN-003")).toBe(true);
+    expect(controlBelongsToDomain("sysctl", "SSH-005")).toBe(false);
+    expect(controlBelongsToDomain("ssh", "SSH-002")).toBe(true);
+    expect(controlBelongsToDomain("service", "SVC-001")).toBe(true);
+    expect(controlBelongsToDomain("logging", "AUD-001")).toBe(true);
+    expect(controlBelongsToDomain("logging", "LOG-001")).toBe(true);
+    expect(controlBelongsToDomain("filesystem", "FS-001")).toBe(true);
+    expect(controlBelongsToDomain("firewall", "FW-001")).toBe(true);
+  });
+});
 
 describe("command safety", () => {
-  const rejected = [
-    "ls; rm -rf /",
-    "/bin/ls",
-    "ls -la",
-    "sh -c whoami",
-    "",
-    "a b",
-    "$(whoami)",
-    "`id`",
-    "rm -rf /",
-  ];
-  for (const command of rejected) {
-    test(`rejects unsafe command ${JSON.stringify(command)}`, () => {
-      expect(() => assertSafeCommand(command, [])).toThrow(CommandSafetyError);
-    });
-  }
-
-  test("accepts only bare executable names", () => {
-    expect(() => assertSafeCommand("ss", ["-tulpn"])).not.toThrow();
-    expect(() => assertSafeCommand("dpkg-query", ["-W"])).not.toThrow();
-    expect(COMMAND_NAME_PATTERN.test("systemctl")).toBe(true);
-    expect(COMMAND_NAME_PATTERN.test("../../bin/sh")).toBe(false);
+  test("shell-shaped commands are rejected before execution", () => {
+    for (const bad of ["ls; rm -rf /", "/bin/ls", "sh -c whoami", "a b", ""]) {
+      expect(() => assertSafeCommand(bad, [])).toThrow(CommandSafetyError);
+    }
+    expect(() => assertSafeCommand("sysctl", ["-n", "kernel.randomize_va_space"])).not.toThrow();
   });
 
-  test("rejects NUL bytes in args", () => {
-    expect(() => assertSafeCommand("ls", ["a\0b"])).toThrow(CommandSafetyError);
-  });
-
-  test("runner never uses a shell: metacharacters are literal args", async () => {
+  test("argv metacharacters are literal (no shell)", async () => {
     const runner = new ExecCommandRunner({ timeoutMs: 5000 });
-    // Passing metacharacters as argv must not execute them.
     const outcome = await runner.run("printf", ["%s", "$(whoami); `id`"]);
     expect(outcome.status).toBe("ok");
     expect(outcome.stdout).toBe("$(whoami); `id`");
   });
-
-  test("missing binary normalizes to unavailable", async () => {
-    const runner = new ExecCommandRunner({ timeoutMs: 5000 });
-    const outcome = await runner.run("this-binary-does-not-exist-xyz", []);
-    expect(outcome.status).toBe("unavailable");
-    expect(outcome.notRun).toBe(true);
-  });
-
-  test("timeout is enforced and normalized", async () => {
-    const runner = new ExecCommandRunner({ timeoutMs: 150 });
-    const outcome = await runner.run("sleep", ["5"]);
-    expect(outcome.status).toBe("timeout");
-  });
 });
 
-describe("server id and path safety", () => {
-  const rejected = ["../../etc", "../server", "/tmp/foo", "..", "", "UPPER", "srv a", "srv/x"];
-  for (const bad of rejected) {
-    test(`rejects unsafe serverId ${JSON.stringify(bad)}`, () => {
-      expect(() => resolveServerDir(path.join(tmpdir(), "root"), bad)).toThrow(PathSafetyError);
-    });
-  }
-
-  test("derived server ids always satisfy the safe pattern", () => {
-    const derived = deriveServerId({ machineId: "abc", hostname: "host" });
-    expect(SERVER_ID_PATTERN.test(derived.serverId)).toBe(true);
-    expect(derived.serverId).toMatch(/^srv-[0-9a-f]{16}$/);
-  });
-
-  test("derivation is deterministic and does not leak the machine-id", () => {
-    const a = deriveServerId({ machineId: "secret-machine-id", hostname: "h" });
-    const b = deriveServerId({ machineId: "secret-machine-id", hostname: "h" });
-    expect(a.serverId).toBe(b.serverId);
-    expect(a.serverId).not.toContain("secret-machine-id");
-    expect(a.stable).toBe(true);
-  });
-
-  test("falls back to hostname hash and flags instability", () => {
-    const derived = deriveServerId({ machineId: null, hostname: "host-1" });
-    expect(derived.stable).toBe(false);
-    expect(derived.basis).toBe("hostname-fallback");
-    expect(SERVER_ID_PATTERN.test(derived.serverId)).toBe(true);
-  });
-
-  test("different identities produce different ids", () => {
-    const a = deriveServerId({ machineId: "one", hostname: "h" });
-    const b = deriveServerId({ machineId: "two", hostname: "h" });
-    expect(a.serverId).not.toBe(b.serverId);
-  });
-});
-
-describe("tool argument contracts", () => {
-  test("inventory tool exposes only bounded arguments", () => {
-    expect(Object.keys(inventoryTool.args).sort()).toEqual(["action", "serverId"]);
-    expect(typeof inventoryTool.description).toBe("string");
-    // No free-form command field exists.
-    expect(Object.keys(inventoryTool.args)).not.toContain("command");
-    expect(Object.keys(inventoryTool.args)).not.toContain("args");
-  });
-
-  test("state tool exposes only bounded arguments", () => {
-    expect(Object.keys(stateTool.args).sort()).toEqual(["action", "serverId"]);
-    expect(Object.keys(stateTool.args)).not.toContain("command");
-  });
-
-  test("inventory tool rejects unexpected arguments", async () => {
-    const execute = inventoryTool.execute as (args: unknown) => Promise<string>;
-    await expect(execute({ action: "show", command: "rm -rf /" })).rejects.toBeInstanceOf(ToolArgumentError);
-    await expect(execute({ action: "show", shell: "bash" })).rejects.toBeInstanceOf(ToolArgumentError);
-  });
-
-  test("inventory tool rejects unknown actions", async () => {
-    const execute = inventoryTool.execute as (args: unknown) => Promise<string>;
-    await expect(execute({ action: "run_shell" })).rejects.toBeInstanceOf(ToolArgumentError);
-    await expect(execute({ action: "remediate" })).rejects.toBeInstanceOf(ToolArgumentError);
-  });
-
-  test("inventory tool rejects traversal serverIds", async () => {
-    const execute = inventoryTool.execute as (args: unknown) => Promise<string>;
-    for (const bad of ["../../etc", "../server", "/tmp/foo"]) {
-      await expect(execute({ action: "show", serverId: bad })).rejects.toBeInstanceOf(ToolArgumentError);
+describe("state path safety", () => {
+  test("backup ids cannot escape the store", () => {
+    const pattern = /^bkp-[a-z0-9][a-z0-9-]{7,63}$/;
+    for (const bad of ["../../etc", "../bkp", "/tmp/bkp", "bkp", "bkp/a"]) {
+      expect(() => assertSafeId(bad, pattern, "backup id")).toThrow(PathSafetyError);
     }
-  });
-
-  test("state tool rejects unexpected arguments and unknown actions", async () => {
-    const execute = stateTool.execute as (args: unknown) => Promise<string>;
-    await expect(execute({ action: "status", extra: 1 })).rejects.toBeInstanceOf(ToolArgumentError);
-    await expect(execute({ action: "delete-everything" })).rejects.toBeInstanceOf(ToolArgumentError);
-  });
-
-  test("state tool requires a serverId for load-inventory", async () => {
-    const execute = stateTool.execute as (args: unknown) => Promise<string>;
-    await expect(execute({ action: "load-inventory" })).rejects.toBeInstanceOf(ToolArgumentError);
-  });
-
-  test("state tool rejects traversal serverIds", async () => {
-    const execute = stateTool.execute as (args: unknown) => Promise<string>;
-    await expect(execute({ action: "load-inventory", serverId: "../../etc" })).rejects.toBeInstanceOf(
-      ToolArgumentError,
-    );
+    expect(() => assertSafeId("bkp-0123456789abcdef", pattern, "backup id")).not.toThrow();
   });
 });

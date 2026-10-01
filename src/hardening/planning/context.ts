@@ -7,7 +7,7 @@
  */
 
 import { services, sockets } from "../controls/helpers";
-import { PlanningError } from "../errors";
+import { AssessmentError } from "../errors";
 import type {
   Criticality,
   Environment,
@@ -19,10 +19,8 @@ import type {
   ServerRole,
 } from "../models";
 
-export function emptyContext(serverId: string, updatedAt: string): OperationalContext {
+export function emptyContext(updatedAt: string): OperationalContext {
   return {
-    schemaVersion: 1,
-    serverId,
     updatedAt,
     environment: "unknown",
     criticality: "unknown",
@@ -177,28 +175,28 @@ export const SERVER_ROLE_VALUES: ServerRole[] = [
 function asBoolean(path: string, value: unknown): boolean | null {
   if (value === null) return null;
   if (typeof value !== "boolean") {
-    throw new PlanningError(`context "${path}" expects a boolean or null`);
+    throw new AssessmentError(`context "${path}" expects a boolean or null`);
   }
   return value;
 }
 
 function asEnum<T extends string>(path: string, value: unknown, allowed: T[]): T {
   if (typeof value !== "string" || !allowed.includes(value as T)) {
-    throw new PlanningError(`context "${path}" expects one of: ${allowed.join(", ")}`);
+    throw new AssessmentError(`context "${path}" expects one of: ${allowed.join(", ")}`);
   }
   return value as T;
 }
 
 function asStringArray(path: string, value: unknown): string[] {
   if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) {
-    throw new PlanningError(`context "${path}" expects an array of strings`);
+    throw new AssessmentError(`context "${path}" expects an array of strings`);
   }
   return value as string[];
 }
 
 /**
  * Apply a single answer (by context path) to a context, returning a new
- * context. Pure. Throws `PlanningError` on unknown paths or invalid values so
+ * context. Pure. Throws `AssessmentError` on unknown paths or invalid values so
  * no schema violation can be persisted.
  */
 export function applyContextPath(
@@ -217,7 +215,7 @@ export function applyContextPath(
       return { ...context, highAvailability: asBoolean(path, value) };
     case "operatorNotes":
       if (value !== null && typeof value !== "string") {
-        throw new PlanningError('context "operatorNotes" expects a string or null');
+        throw new AssessmentError('context "operatorNotes" expects a string or null');
       }
       return { ...context, operatorNotes: value as string | null };
     case "management.methods":
@@ -259,7 +257,7 @@ export function applyContextPath(
       return { ...context, roles: assignments };
     }
     default:
-      throw new PlanningError(`unknown context path "${path}"`);
+      throw new AssessmentError(`unknown context path "${path}"`);
   }
 }
 

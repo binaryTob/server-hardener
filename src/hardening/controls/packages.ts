@@ -24,8 +24,6 @@ export const packageControls: ControlDefinition[] = [
     id: "PKG-001",
     title: "A package manager is available",
     category: "packages",
-    phase: "foundational",
-    order: 20,
     platform: ["linux"],
     description: "The host should have a working package manager (dpkg or rpm).",
     rationale:
@@ -65,8 +63,6 @@ export const packageControls: ControlDefinition[] = [
     id: "PKG-002",
     title: "Installed packages are reviewed",
     category: "packages",
-    phase: "services",
-    order: 30,
     platform: ["linux"],
     description: "Installed software should be reconciled with the host's role.",
     rationale:
@@ -106,8 +102,6 @@ export const packageControls: ControlDefinition[] = [
     id: "PKG-003",
     title: "No end-of-life or unsupported packages",
     category: "packages",
-    phase: "services",
-    order: 40,
     platform: ["linux"],
     description: "Installed packages should be within their supported lifecycle.",
     rationale:

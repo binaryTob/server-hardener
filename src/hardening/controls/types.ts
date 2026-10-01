@@ -6,7 +6,7 @@
  * (ServerInventory, OperationalContext). Nothing here executes commands or
  * touches the host — evaluation is fully evidence-based and deterministic.
  *
- * The serializable result of evaluating a definition is a `PlannedControl`.
+ * The serializable result of evaluating a definition is an `EvaluatedControl`.
  */
 import type {
   ApplicabilityDecision,
@@ -15,7 +15,6 @@ import type {
   EvidenceRef,
   OperationalContext,
   OSFamily,
-  PlanPhase,
   RiskAssessment,
   RiskLevel,
   ServerInventory,
@@ -66,10 +65,6 @@ export interface ControlDefinition {
   id: string;
   title: string;
   category: ControlCategory;
-  /** Operational ordering bucket. */
-  phase: PlanPhase;
-  /** Deterministic tie-breaker within a phase (lower first). */
-  order: number;
   /** OS families this control is designed for. */
   platform: OSFamily[];
   description: string;

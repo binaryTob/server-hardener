@@ -11,11 +11,17 @@
  */
 import { alternativeAdminUserPrecondition, privilegeEscalationPrecondition } from "../controls/helpers";
 import type { PreconditionCheck, PreconditionSpec } from "../controls/types";
-import type { ChangeRecord, VerificationResult } from "../models";
-import { newVerificationId } from "../state";
+import type { VerificationResult } from "../models";
+import { newVerificationId } from "../store";
 import { readDirective, upsertDirective } from "./config";
 import { createBackup, readTextOrNull, restoreBackup, writeTextAtomic } from "./fsops";
-import type { Remediation, RemediationApplyResult, RemediationContext, RemediationPreview } from "./types";
+import type {
+  AppliedChange,
+  Remediation,
+  RemediationApplyResult,
+  RemediationContext,
+  RemediationPreview,
+} from "./types";
 
 interface SshSpec {
   key: string;
@@ -148,9 +154,7 @@ async function verify(ctx: RemediationContext): Promise<VerificationResult> {
     active.stdout.trim() === "active" &&
     effective?.toLowerCase() === current.value.toLowerCase();
   return {
-    schemaVersion: 1,
     verificationId: newVerificationId(),
-    serverId: ctx.serverId,
     timestamp: ctx.now(),
     target: ctx.paths.sshdConfig,
     check: "sshd syntax valid, service active and effective directive as desired",
@@ -218,10 +222,10 @@ async function reloadSsh(ctx: RemediationContext): Promise<{ ok: boolean; detail
   return { ok: false, detail: "systemctl reload failed for ssh/sshd" };
 }
 
-async function rollback(ctx: RemediationContext, change: ChangeRecord): Promise<RemediationApplyResult> {
+async function rollback(ctx: RemediationContext, change: AppliedChange): Promise<RemediationApplyResult> {
   const before = JSON.parse(change.before ?? "{}") as { backupId?: string };
   if (!before.backupId) return refused(ctx, "no SSH backup recorded; manual rollback required");
-  await restoreBackup(ctx.stateRoot, ctx.serverId, before.backupId);
+  await restoreBackup(ctx.storeRoot, before.backupId);
   const syntax = await ctx.runner.run("sshd", ["-t"]);
   if (syntax.status === "ok") await reloadSsh(ctx);
   const verification = await verify(ctx);
@@ -246,9 +250,7 @@ function refused(ctx: RemediationContext, reason: string): RemediationApplyResul
     after: null,
     backupIds: [],
     verification: {
-      schemaVersion: 1,
       verificationId: newVerificationId(),
-      serverId: ctx.serverId,
       timestamp: ctx.now(),
       target: ctx.control.controlId,
       check: "apply refused",

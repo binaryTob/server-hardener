@@ -21,8 +21,6 @@ export const loggingControls: ControlDefinition[] = [
     id: "LOG-001",
     title: "System logging is active",
     category: "logging",
-    phase: "logging-visibility",
-    order: 10,
     platform: ["linux"],
     description: "At least one system logging service (journald or rsyslog) should be active.",
     rationale:
@@ -83,8 +81,6 @@ export const loggingControls: ControlDefinition[] = [
     id: "LOG-002",
     title: "System logging is persistent across reboot",
     category: "logging",
-    phase: "logging-visibility",
-    order: 20,
     platform: ["linux"],
     description: "Logs should survive a reboot (persistent journald storage or a log service).",
     rationale: "Volatile-only logs are lost on reboot, which is exactly when incident timelines matter most.",
@@ -137,8 +133,6 @@ export const loggingControls: ControlDefinition[] = [
     id: "LOG-003",
     title: "Security monitoring capability is present",
     category: "logging",
-    phase: "logging-visibility",
-    order: 30,
     platform: ["linux"],
     description: "A security monitoring/endpoint agent should be detectable where one is deployed.",
     rationale:

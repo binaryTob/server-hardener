@@ -5,7 +5,7 @@
  * reversible automatically.
  */
 import type { VerificationResult } from "../models";
-import { newVerificationId } from "../state";
+import { newVerificationId } from "../store";
 import type { Remediation, RemediationApplyResult, RemediationContext, RemediationPreview } from "./types";
 
 function packageManager(ctx: RemediationContext): "apt" | "dnf" | null {
@@ -36,9 +36,7 @@ function verification(
 ): VerificationResult {
   const passed = active === true && enabled !== false;
   return {
-    schemaVersion: 1,
     verificationId: newVerificationId(),
-    serverId: ctx.serverId,
     timestamp: ctx.now(),
     target: unit,
     check,
@@ -306,9 +304,7 @@ function refused(ctx: RemediationContext, reason: string): RemediationApplyResul
     after: null,
     backupIds: [],
     verification: {
-      schemaVersion: 1,
       verificationId: newVerificationId(),
-      serverId: ctx.serverId,
       timestamp: ctx.now(),
       target: ctx.control.controlId,
       check: "apply refused",

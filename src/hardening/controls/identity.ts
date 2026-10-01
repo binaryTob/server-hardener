@@ -24,8 +24,6 @@ export const identityControls: ControlDefinition[] = [
     id: "ID-001",
     title: "Only one account may have UID 0",
     category: "identity",
-    phase: "prerequisites",
-    order: 10,
     platform: ["linux"],
     description: "Exactly one account (root) should have UID 0.",
     rationale:
@@ -69,8 +67,6 @@ export const identityControls: ControlDefinition[] = [
     id: "ID-002",
     title: "System accounts must not have interactive shells",
     category: "identity",
-    phase: "identity",
-    order: 10,
     platform: ["linux"],
     description: "Accounts below the human UID range should not offer interactive login shells.",
     rationale:
@@ -125,8 +121,6 @@ export const identityControls: ControlDefinition[] = [
     id: "ID-003",
     title: "Account lock state is observable",
     category: "identity",
-    phase: "identity",
-    order: 20,
     platform: ["linux"],
     description: "The framework should be able to determine whether accounts are locked.",
     rationale:

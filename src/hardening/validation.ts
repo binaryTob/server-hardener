@@ -1,25 +1,13 @@
 /**
  * Validation layer: zod schemas mirroring the domain models in models.ts.
  *
- * Every document is validated before being persisted and again when loaded.
- * Corrupt or incompatible data produces an explicit ValidationFailureError
+ * Used to validate data before it is written to `.server-hardener/` and when
+ * it is read back. Corrupt data produces an explicit ValidationFailureError
  * listing every offending path — no silent coercion.
- *
- * The schemas intentionally mirror models.ts one-to-one; persistence round-trip
- * tests keep both sides aligned.
  */
 import { z } from "zod";
-import { UnsupportedSchemaVersionError, ValidationFailureError } from "./errors";
-import {
-  type BackupRecord,
-  type ChangeRecord,
-  type HardeningPlan,
-  type OperationalContext,
-  type RollbackRecord,
-  SCHEMA_VERSION,
-  type ServerInventory,
-  type VerificationResult,
-} from "./models";
+import { ValidationFailureError } from "./errors";
+import type { BackupRecord, LastRun, OperationalContext, ServerInventory } from "./models";
 
 const confidenceSchema = z.enum(["observed", "derived", "unknown"]);
 
@@ -284,9 +272,6 @@ const containersDataSchema = z.object({
 // --- ServerInventory --------------------------------------------------------
 
 export const serverInventorySchema = z.object({
-  schemaVersion: z.literal(SCHEMA_VERSION),
-  inventoryId: z.string().min(1),
-  serverId: z.string().min(1),
   generatedAt: z.string().min(1),
   identity: section(identityDataSchema),
   operatingSystem: section(operatingSystemDataSchema),
@@ -314,28 +299,7 @@ export function validateServerInventory(input: unknown): ServerInventory {
   return result.data as ServerInventory;
 }
 
-/**
- * Check the schemaVersion field of a raw (possibly foreign) document before
- * full validation. Explicit error on incompatible versions; anything that is
- * not a versioned document is rejected.
- */
-export function checkSchemaVersion(input: unknown, expected: number = SCHEMA_VERSION): number {
-  if (typeof input !== "object" || input === null) {
-    throw new ValidationFailureError("Document is not an object", ["(root): not an object"]);
-  }
-  const version = (input as { schemaVersion?: unknown }).schemaVersion;
-  if (typeof version !== "number" || !Number.isInteger(version)) {
-    throw new ValidationFailureError("Document has no integer schemaVersion", [
-      "schemaVersion: missing or not an integer",
-    ]);
-  }
-  if (version !== expected) {
-    throw new UnsupportedSchemaVersionError(version, expected);
-  }
-  return version;
-}
-
-// --- Operational context (Phase 2) ----------------------------------------
+// --- Operational context --------------------------------------------------
 
 const environmentSchema = z.enum(["production", "staging", "development", "testing", "unknown"]);
 const criticalitySchema = z.enum(["low", "medium", "high", "critical", "unknown"]);
@@ -379,8 +343,6 @@ const cidrSchema = z
 
 export const operationalContextSchema = z
   .object({
-    schemaVersion: z.literal(SCHEMA_VERSION),
-    serverId: z.string().min(1),
     updatedAt: z.string().min(1),
     environment: environmentSchema,
     criticality: criticalitySchema,
@@ -418,219 +380,47 @@ export function validateOperationalContext(input: unknown): OperationalContext {
   return result.data as OperationalContext;
 }
 
-// --- Plans (Phase 2) -------------------------------------------------------
-
-const riskLevelSchema = z.enum(["none", "low", "medium", "high", "critical", "unknown"]);
-const controlEvaluationStatusSchema = z.enum([
-  "compliant",
-  "non-compliant",
-  "not-applicable",
-  "unknown",
-  "requires-context",
-  "requires-review",
-  "blocked",
-  "unsupported",
-  "error",
-]);
-const applicabilityStatusSchema = z.enum([
-  "applicable",
-  "not-applicable",
-  "unknown",
-  "unsupported",
-  "requires-context",
-]);
-const controlCategorySchema = z.enum([
-  "identity",
-  "privileged-access",
-  "ssh",
-  "network",
-  "firewall",
-  "services",
-  "packages",
-  "filesystem",
-  "kernel",
-  "logging",
-  "auditing",
-  "time",
-  "containers",
-]);
-const planPhaseSchema = z.enum([
-  "prerequisites",
-  "foundational",
-  "logging-visibility",
-  "identity",
-  "services",
-  "network",
-  "access",
-  "disruptive",
-]);
-const evidenceRefSchema = z.object({
-  inventoryPath: z.string().min(1),
-  observed: z.string().nullable(),
-  note: z.string().optional(),
-});
-const applicabilityDecisionSchema = z.object({
-  status: applicabilityStatusSchema,
-  rationale: z.string(),
-  evidence: z.array(evidenceRefSchema),
-  missingContext: z.array(z.string()),
-  confidence: confidenceSchema,
-});
-const preconditionSchema = z.object({
-  id: z.string().min(1),
-  description: z.string().min(1),
-  critical: z.boolean(),
-  status: z.enum(["satisfied", "unsatisfied", "unknown"]),
-  evidence: z.array(evidenceRefSchema),
-  missingContext: z.array(z.string()),
-  reason: z.string().nullable(),
-});
-const riskAssessmentSchema = z.object({
-  securityImpact: riskLevelSchema,
-  availabilityRisk: riskLevelSchema,
-  lockoutRisk: riskLevelSchema,
-  operationalComplexity: riskLevelSchema,
-  rationale: z.string(),
-});
-const plannedControlSchema = z.object({
-  controlId: z.string().min(1),
-  title: z.string().min(1),
-  category: controlCategorySchema,
-  phase: planPhaseSchema,
-  phaseIndex: z.number().int().nonnegative(),
-  order: z.number().int().positive(),
-  status: controlEvaluationStatusSchema,
-  currentState: z.string().nullable(),
-  desiredState: z.string(),
-  applicability: applicabilityDecisionSchema,
-  risk: riskAssessmentSchema,
-  preconditions: z.array(preconditionSchema),
-  blockers: z.array(z.string()),
-  missingContext: z.array(z.string()),
-  evidence: z.array(evidenceRefSchema),
-  requiresApproval: z.boolean(),
-  reversible: z.boolean(),
-  tags: z.array(z.string()),
-});
-const planningQuestionSchema = z.object({
-  id: z.string().min(1),
-  prompt: z.string().min(1),
-  reason: z.string().min(1),
-  affectedControls: z.array(z.string()),
-  type: z.enum(["boolean", "single-choice", "multi-choice", "text", "cidr-list"]),
-  options: z.array(z.string()).optional(),
-  contextPath: z.string().min(1),
-});
-const planBlockerSchema = z.object({
-  controlId: z.string().min(1),
-  reason: z.string().min(1),
-  preconditionIds: z.array(z.string()),
-});
-const planCountsSchema = z.record(controlEvaluationStatusSchema, z.number().int().nonnegative());
-const planStatusSchema = z.enum([
-  "draft",
-  "review",
-  "approved",
-  "applying",
-  "completed",
-  "failed",
-  "rolled-back",
-]);
-
-export const hardeningPlanSchema = z.object({
-  schemaVersion: z.literal(SCHEMA_VERSION),
-  planId: z.string().min(1),
-  serverId: z.string().min(1),
-  inventoryId: z.string().min(1),
-  contextUpdatedAt: z.string().nullable(),
-  generatedAt: z.string().min(1),
-  profile: z.string().min(1),
-  catalogVersion: z.string().min(1),
-  controls: z.array(plannedControlSchema),
-  counts: planCountsSchema,
-  unresolvedQuestions: z.array(planningQuestionSchema),
-  blockers: z.array(planBlockerSchema),
-  warnings: z.array(z.string()),
-  status: planStatusSchema,
-});
-
-export function validateHardeningPlan(input: unknown): HardeningPlan {
-  const result = hardeningPlanSchema.safeParse(input);
-  if (!result.success) {
-    throw new ValidationFailureError(
-      "HardeningPlan failed schema validation",
-      result.error.issues.map((issue) => {
-        const path = issue.path.length > 0 ? issue.path.map(String).join(".") : "(root)";
-        return `${path}: ${issue.message}`;
-      }),
-    );
-  }
-  return result.data as HardeningPlan;
-}
-
-export const changeRecordSchema = z.object({
-  schemaVersion: z.literal(SCHEMA_VERSION),
-  changeId: z.string().min(1),
-  controlId: z.string().min(1),
-  serverId: z.string().min(1),
-  timestamp: z.string().min(1),
-  target: z.string().min(1),
-  before: z.string().nullable(),
-  after: z.string().nullable(),
-  result: z.enum(["applied", "failed", "skipped", "rolled-back"]),
-  verificationId: z.string().nullable(),
-  rollbackId: z.string().nullable(),
-});
-
-export const exceptionRecordSchema = z.object({
-  schemaVersion: z.literal(SCHEMA_VERSION),
-  exceptionId: z.string().min(1),
-  controlId: z.string().min(1),
-  serverId: z.string().min(1),
-  reason: z.string().min(1),
-  scope: z.enum(["server", "control", "parameter"]),
-  createdAt: z.string().min(1),
-  expiresAt: z.string().nullable(),
-  acceptedRisk: z.string().min(1),
-  evidence: z.array(z.string()),
-});
-
-export const rollbackRecordSchema = z.object({
-  schemaVersion: z.literal(SCHEMA_VERSION),
-  rollbackId: z.string().min(1),
-  changeId: z.string().min(1),
-  serverId: z.string().min(1),
-  timestamp: z.string().min(1),
-  available: z.boolean(),
-  strategy: z.string().nullable(),
-  artifacts: z.array(z.string()),
-  verificationId: z.string().nullable(),
-});
-
-export const verificationResultSchema = z.object({
-  schemaVersion: z.literal(SCHEMA_VERSION),
-  verificationId: z.string().min(1),
-  serverId: z.string().min(1),
-  timestamp: z.string().min(1),
-  target: z.string().min(1),
-  check: z.string().min(1),
-  expected: z.string().min(1),
-  observed: z.string().nullable(),
-  passed: z.boolean().nullable(),
-  evidence: z.array(z.string()),
-  error: z.string().nullable(),
-});
+// --- Local state: backups and last-run ------------------------------------
 
 export const backupRecordSchema = z.object({
-  schemaVersion: z.literal(SCHEMA_VERSION),
   backupId: z.string().min(1),
-  serverId: z.string().min(1),
   controlId: z.string().min(1),
   originalPath: z.string().min(1),
   createdAt: z.string().min(1),
   sha256: z.string().min(1),
   bytes: z.number().int().nonnegative(),
+  mode: z.number().int().nonnegative().nullable(),
+  uid: z.number().int().nullable(),
+  gid: z.number().int().nullable(),
   content: z.string(),
+});
+
+const verificationSummarySchema = z.object({
+  check: z.string(),
+  expected: z.string(),
+  observed: z.string().nullable(),
+  passed: z.boolean().nullable(),
+});
+
+export const lastRunEntrySchema = z.object({
+  at: z.string().min(1),
+  controlId: z.string().min(1),
+  action: z.enum(["apply", "rollback"]),
+  target: z.string(),
+  result: z.enum(["applied", "skipped", "failed", "rolled-back", "manual"]),
+  changed: z.boolean(),
+  message: z.string(),
+  before: z.string().nullable(),
+  after: z.string().nullable(),
+  verification: verificationSummarySchema.nullable(),
+  backupIds: z.array(z.string()),
+});
+
+export const lastRunSchema = z.object({
+  updatedAt: z.string().min(1),
+  hostname: z.string().nullable(),
+  evaluated: z.number().int().nonnegative(),
+  entries: z.array(lastRunEntrySchema),
 });
 
 function validationIssues(error: z.ZodError): string[] {
@@ -638,36 +428,6 @@ function validationIssues(error: z.ZodError): string[] {
     const path = issue.path.length > 0 ? issue.path.map(String).join(".") : "(root)";
     return `${path}: ${issue.message}`;
   });
-}
-
-export function validateChangeRecord(input: unknown): ChangeRecord {
-  const result = changeRecordSchema.safeParse(input);
-  if (!result.success) {
-    throw new ValidationFailureError("ChangeRecord failed schema validation", validationIssues(result.error));
-  }
-  return result.data as ChangeRecord;
-}
-
-export function validateVerificationResult(input: unknown): VerificationResult {
-  const result = verificationResultSchema.safeParse(input);
-  if (!result.success) {
-    throw new ValidationFailureError(
-      "VerificationResult failed schema validation",
-      validationIssues(result.error),
-    );
-  }
-  return result.data as VerificationResult;
-}
-
-export function validateRollbackRecord(input: unknown): RollbackRecord {
-  const result = rollbackRecordSchema.safeParse(input);
-  if (!result.success) {
-    throw new ValidationFailureError(
-      "RollbackRecord failed schema validation",
-      validationIssues(result.error),
-    );
-  }
-  return result.data as RollbackRecord;
 }
 
 export function validateBackupRecord(input: unknown): BackupRecord {
@@ -678,9 +438,10 @@ export function validateBackupRecord(input: unknown): BackupRecord {
   return result.data as BackupRecord;
 }
 
-// Type guards tying the zod schemas to the model contracts.
-export type ValidatedPlan = z.infer<typeof hardeningPlanSchema>;
-export type ValidatedChange = z.infer<typeof changeRecordSchema>;
-export type ValidatedException = z.infer<typeof exceptionRecordSchema>;
-export type ValidatedRollback = z.infer<typeof rollbackRecordSchema>;
-export type ValidatedVerification = z.infer<typeof verificationResultSchema>;
+export function validateLastRun(input: unknown): LastRun {
+  const result = lastRunSchema.safeParse(input);
+  if (!result.success) {
+    throw new ValidationFailureError("LastRun failed schema validation", validationIssues(result.error));
+  }
+  return result.data as LastRun;
+}

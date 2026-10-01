@@ -1,6 +1,7 @@
 /**
  * Control evaluation: composes applicability, state assessment, risk and
- * preconditions into a single deterministic `PlannedControl`.
+ * preconditions into a deterministic `EvaluatedControl`, then classifies it
+ * into an operator-facing tier (safe / review / risky / skip).
  *
  * Decision precedence (engine-owned, never the LLM's):
  *   not-applicable / unsupported / unknown / requires-context (applicability)
@@ -15,19 +16,51 @@
 import type { ControlDefinition, ControlStateAssessment } from "../controls/types";
 import type {
   ControlEvaluationStatus,
+  EvaluatedControl,
   EvidenceRef,
   OperationalContext,
-  PlannedControl,
+  RiskLevel,
   ServerInventory,
+  Tier,
 } from "../models";
 import { decideApplicability } from "./applicability";
-import { phaseIndex } from "./phases";
 import {
   assessPreconditions,
   criticalPreconditionsUnknown,
   criticalPreconditionsUnsatisfied,
 } from "./preconditions";
 import { assessRisk } from "./risk";
+
+const ACTIONABLE: ReadonlySet<ControlEvaluationStatus> = new Set([
+  "non-compliant",
+  "requires-review",
+  "requires-context",
+  "blocked",
+]);
+
+const HIGH: ReadonlySet<RiskLevel> = new Set(["high", "critical"]);
+
+/**
+ * Operator-facing grouping. No numeric scoring:
+ * - safe:   low operational impact, no lockout, low availability risk;
+ * - risky:  can cut access (higher lockout) or disrupt availability;
+ * - review: everything else that needs a human decision;
+ * - skip:   nothing to do (compliant / not applicable / unsupported).
+ */
+export function classifyTier(control: {
+  status: ControlEvaluationStatus;
+  risk: { availabilityRisk: RiskLevel; lockoutRisk: RiskLevel };
+}): Tier {
+  if (!ACTIONABLE.has(control.status)) return "skip";
+  if (HIGH.has(control.risk.lockoutRisk) || HIGH.has(control.risk.availabilityRisk)) return "risky";
+  const low =
+    !HIGH.has(control.risk.availabilityRisk) &&
+    !HIGH.has(control.risk.lockoutRisk) &&
+    (control.risk.availabilityRisk === "none" || control.risk.availabilityRisk === "low") &&
+    (control.risk.lockoutRisk === "none" || control.risk.lockoutRisk === "low");
+  if (control.status === "non-compliant" && low) return "safe";
+  return "review";
+}
 
 function safeAssess(
   control: ControlDefinition,
@@ -67,7 +100,7 @@ export function evaluateControl(
   control: ControlDefinition,
   inventory: ServerInventory,
   context: OperationalContext,
-): PlannedControl {
+): EvaluatedControl {
   const applicability = decideApplicability(control, inventory, context);
   const actionable = applicability.status === "applicable" || applicability.status === "requires-context";
 
@@ -122,10 +155,8 @@ export function evaluateControl(
     controlId: control.id,
     title: control.title,
     category: control.category,
-    phase: control.phase,
-    phaseIndex: phaseIndex(control.phase),
-    order: control.order,
     status,
+    tier: classifyTier({ status, risk }),
     currentState: state.currentState,
     desiredState: control.desiredState,
     applicability,
@@ -142,4 +173,16 @@ export function evaluateControl(
     reversible: control.reversible,
     tags: control.tags,
   };
+}
+
+/** Evaluate the whole catalog and group by tier. */
+export function evaluateCatalog(
+  catalog: ControlDefinition[],
+  inventory: ServerInventory,
+  context: OperationalContext,
+): { controls: EvaluatedControl[]; byTier: Record<Tier, EvaluatedControl[]> } {
+  const controls = catalog.map((definition) => evaluateControl(definition, inventory, context));
+  const byTier: Record<Tier, EvaluatedControl[]> = { safe: [], review: [], risky: [], skip: [] };
+  for (const control of controls) byTier[control.tier].push(control);
+  return { controls, byTier };
 }

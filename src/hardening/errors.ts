@@ -1,9 +1,5 @@
 /**
- * Typed error hierarchy for the hardening framework.
- *
- * Every failure mode that the framework can produce has a dedicated error
- * class so that callers can branch on the error kind instead of parsing
- * message strings.
+ * Typed error hierarchy. Callers branch on the class, never on message strings.
  */
 
 export class HardeningError extends Error {
@@ -13,7 +9,7 @@ export class HardeningError extends Error {
   }
 }
 
-/** A document failed schema validation. `issues` lists human-readable paths. */
+/** A document or value failed schema validation. `issues` lists offending paths. */
 export class ValidationFailureError extends HardeningError {
   readonly issues: string[];
 
@@ -23,26 +19,14 @@ export class ValidationFailureError extends HardeningError {
   }
 }
 
-/** Persisted state is unreadable, corrupt, or incompatible. */
+/** Local state (.server-hardener) is unreadable, corrupt, or unsafe. */
 export class StateError extends HardeningError {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
   }
 }
 
-/** A persisted document declares a schema version we cannot handle. */
-export class UnsupportedSchemaVersionError extends StateError {
-  readonly found: number;
-  readonly supported: number;
-
-  constructor(found: number, supported: number) {
-    super(`Unsupported schema version ${found}; this framework supports ${supported}`);
-    this.found = found;
-    this.supported = supported;
-  }
-}
-
-/** An identifier or path attempted to escape the state directory. */
+/** An identifier or path attempted to escape the local state directory. */
 export class PathSafetyError extends StateError {
   constructor(message: string) {
     super(message);
@@ -70,8 +54,8 @@ export class DiscoveryError extends HardeningError {
   }
 }
 
-/** Planning could not proceed (missing inventory, invalid context, ...). */
-export class PlanningError extends HardeningError {
+/** Assessment could not proceed (invalid context, unknown control, ...). */
+export class AssessmentError extends HardeningError {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
   }

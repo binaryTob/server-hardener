@@ -1,39 +1,37 @@
 /**
- * Discovery orchestrator.
+ * Local discovery orchestrator.
  *
  * Pipeline (one direction, no shortcuts):
  *   Collector (read-only commands + file reads)
  *     -> raw results
  *     -> Parsers (pure functions)
- *     -> domain model (ServerInventory sections)
- *     -> [caller: validation -> atomic storage]
+ *     -> domain model (ServerInventory)
  *
- * The orchestrator never persists anything itself and never runs a command
- * that the collectors did not hardcode. A failing parser degrades to a single
- * section with status "error"; it never aborts the inventory.
+ * The orchestrator never persists anything and never runs a command the
+ * collectors did not hardcode. A failing parser degrades to a single section
+ * with status "error"; it never aborts the inspection.
  */
 
 import { collectLinuxRaw } from "./collectors/linux";
 import { type CommandRunner, ExecCommandRunner } from "./exec";
 import { type FileReader, NodeFileReader } from "./fsio";
-import {
-  type CollectionStatus,
-  type ContainersData,
-  type FilesystemsData,
-  type IdentityData,
-  type NetworkData,
-  type OperatingSystemData,
-  type PackagesData,
-  type PrivilegedAccessData,
-  SCHEMA_VERSION,
-  type Section,
-  type SectionName,
-  type SecurityControlsData,
-  type ServerInventory,
-  type ServicesData,
-  type SocketData,
-  type TimeData,
-  type UsersData,
+import type {
+  CollectionStatus,
+  ContainersData,
+  FilesystemsData,
+  IdentityData,
+  NetworkData,
+  OperatingSystemData,
+  PackagesData,
+  PrivilegedAccessData,
+  Section,
+  SectionName,
+  SecurityControlsData,
+  ServerInventory,
+  ServicesData,
+  SocketData,
+  TimeData,
+  UsersData,
 } from "./models";
 import { parseContainers } from "./parsers/linux/containers";
 import { parseIdentity, parseOperatingSystem } from "./parsers/linux/identity";
@@ -46,7 +44,6 @@ import { parseServices } from "./parsers/linux/services";
 import { parseSockets } from "./parsers/linux/sockets";
 import { parseTime } from "./parsers/linux/time";
 import { parseUsers } from "./parsers/linux/users";
-import { deriveServerId, newInventoryId } from "./state";
 
 export interface DiscoveryDependencies {
   runner?: CommandRunner;
@@ -71,17 +68,12 @@ export async function runDiscovery(deps: DiscoveryDependencies = {}): Promise<Se
   try {
     raw = await collectLinuxRaw({ runner, files, now: () => collectedAt });
   } catch (err) {
-    // A total collector failure must not throw away the inventory: every
-    // section degrades to "error" with the cause recorded.
     return erroredInventory(collectedAt, err);
   }
 
   const users = safeSection("users", () => parseUsers(raw.users, collectedAt));
 
   const inventory: ServerInventory = {
-    schemaVersion: SCHEMA_VERSION,
-    inventoryId: newInventoryId(),
-    serverId: "",
     generatedAt: collectedAt,
     identity: safeSection("identity", () => parseIdentity(raw.identity, collectedAt)),
     operatingSystem: safeSection("operatingSystem", () => parseOperatingSystem(raw.operatingSystem)),
@@ -106,17 +98,12 @@ export async function runDiscovery(deps: DiscoveryDependencies = {}): Promise<Se
     await enrichSocketExecutables(inventory.sockets, files);
   }
 
-  inventory.serverId = deriveServerId({
-    machineId: inventory.identity.data?.machineId ?? null,
-    hostname: inventory.identity.data?.hostname ?? null,
-  }).serverId;
-
   return inventory;
 }
 
 /**
  * Wrap a parser so an unexpected exception degrades to a single error
- * section instead of aborting the whole inventory.
+ * section instead of aborting the whole inspection.
  */
 function safeSection<T>(name: SectionName, parse: () => Section<T>): Section<T> {
   try {
@@ -143,12 +130,9 @@ async function enrichSocketExecutables(section: Section<SocketData>, files: File
 }
 
 function unsupportedInventory(platform: string, generatedAt: string): ServerInventory {
-  const note = `discovery is only implemented for Linux in Phase 1; detected platform "${platform}"`;
+  const note = `inspection is only implemented for Linux; detected platform "${platform}"`;
   const unsupported = <T>(): Section<T> => ({ status: "unsupported", data: null, notes: [note] });
   return {
-    schemaVersion: SCHEMA_VERSION,
-    inventoryId: newInventoryId(),
-    serverId: deriveServerId({ machineId: null, hostname: null }).serverId,
     generatedAt,
     identity: unsupported<IdentityData>(),
     operatingSystem: {
@@ -177,12 +161,9 @@ function unsupportedInventory(platform: string, generatedAt: string): ServerInve
 }
 
 function erroredInventory(generatedAt: string, cause: unknown): ServerInventory {
-  const message = `discovery collector failed: ${cause instanceof Error ? cause.message : String(cause)}`;
+  const message = `inspection collector failed: ${cause instanceof Error ? cause.message : String(cause)}`;
   const failed = <T>(): Section<T> => ({ status: "error", data: null, error: message });
   return {
-    schemaVersion: SCHEMA_VERSION,
-    inventoryId: newInventoryId(),
-    serverId: deriveServerId({ machineId: null, hostname: null }).serverId,
     generatedAt,
     identity: failed<IdentityData>(),
     operatingSystem: failed<OperatingSystemData>(),
@@ -200,12 +181,25 @@ function erroredInventory(generatedAt: string, cause: unknown): ServerInventory 
 }
 
 // ---------------------------------------------------------------------------
-// Summary (presentation, no persistence)
+// Summary (presentation)
 // ---------------------------------------------------------------------------
 
+export const ALL_SECTIONS: SectionName[] = [
+  "identity",
+  "operatingSystem",
+  "network",
+  "sockets",
+  "users",
+  "privilegedAccess",
+  "services",
+  "packages",
+  "securityControls",
+  "filesystems",
+  "time",
+  "containers",
+];
+
 export interface InventorySummary {
-  serverId: string;
-  inventoryId: string;
   generatedAt: string;
   hostname: string | null;
   osDistribution: string | null;
@@ -226,36 +220,16 @@ export interface InventorySummary {
 }
 
 export function summarizeInventory(inventory: ServerInventory): InventorySummary {
-  const sectionNames: SectionName[] = [
-    "identity",
-    "operatingSystem",
-    "network",
-    "sockets",
-    "users",
-    "privilegedAccess",
-    "services",
-    "packages",
-    "securityControls",
-    "filesystems",
-    "time",
-    "containers",
-  ];
   const sectionStatuses = {} as Record<SectionName, CollectionStatus>;
   const gaps: string[] = [];
-  for (const name of sectionNames) {
+  for (const name of ALL_SECTIONS) {
     const section = inventory[name];
     sectionStatuses[name] = section.status;
-    if (section.status !== "success") {
-      gaps.push(`${name}: ${section.status}`);
-    }
-    for (const note of section.notes ?? []) {
-      gaps.push(`${name}: ${note}`);
-    }
+    if (section.status !== "success") gaps.push(`${name}: ${section.status}`);
+    for (const note of section.notes ?? []) gaps.push(`${name}: ${note}`);
   }
 
   return {
-    serverId: inventory.serverId,
-    inventoryId: inventory.inventoryId,
     generatedAt: inventory.generatedAt,
     hostname: inventory.identity.data?.hostname ?? null,
     osDistribution: inventory.operatingSystem.data?.distribution ?? null,
@@ -278,25 +252,24 @@ export function summarizeInventory(inventory: ServerInventory): InventorySummary
 
 export function formatSummary(summary: InventorySummary): string {
   const lines: string[] = [];
-  lines.push(`serverId: ${summary.serverId}`);
-  lines.push(`inventoryId: ${summary.inventoryId}`);
-  lines.push(`generatedAt: ${summary.generatedAt}`);
   lines.push(`hostname: ${summary.hostname ?? "(unknown)"}`);
   lines.push(`os: ${summary.osDistribution ?? "(unknown)"}`);
   lines.push(`kernel: ${summary.kernelRelease ?? "(unknown)"}`);
-  lines.push("sections:");
+  lines.push("collection status:");
   for (const [name, status] of Object.entries(summary.sectionStatuses)) {
     lines.push(`  ${name}: ${status}`);
   }
-  lines.push("counts:");
-  for (const [name, count] of Object.entries(summary.counts)) {
-    lines.push(`  ${name}: ${count}`);
-  }
+  lines.push("detected:");
+  lines.push(`  interfaces: ${summary.counts.interfaces}`);
+  lines.push(`  listening sockets: ${summary.counts.listeningSockets}`);
+  lines.push(`  users: ${summary.counts.users} · groups: ${summary.counts.groups}`);
+  lines.push(`  services: ${summary.counts.services}`);
+  lines.push(`  packages: ${summary.counts.packages}`);
+  lines.push(`  mounts: ${summary.counts.mounts} · block devices: ${summary.counts.blockDevices}`);
+  lines.push(`  container runtimes: ${summary.counts.containerRuntimes}`);
   if (summary.gaps.length > 0) {
-    lines.push("collection gaps:");
-    for (const gap of summary.gaps) {
-      lines.push(`  - ${gap}`);
-    }
+    lines.push("gaps:");
+    for (const gap of summary.gaps) lines.push(`  - ${gap}`);
   }
   return lines.join("\n");
 }

@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "build": "tsc -p tsconfig.build.json",
-    "collect": "bun run scripts/collect.ts"
+    "inspect": "bun run scripts/inspect.ts"
   },
   "dependencies": {
     "zod": "^4.1.11"

@@ -7,9 +7,15 @@
  * implementation already present. It never replaces one firewall with another.
  * nftables rule generation is deliberately NOT automated.
  */
-import type { ChangeRecord, VerificationResult } from "../models";
-import { newVerificationId } from "../state";
-import type { Remediation, RemediationApplyResult, RemediationContext, RemediationPreview } from "./types";
+import type { VerificationResult } from "../models";
+import { newVerificationId } from "../store";
+import type {
+  AppliedChange,
+  Remediation,
+  RemediationApplyResult,
+  RemediationContext,
+  RemediationPreview,
+} from "./types";
 
 type FirewallKind = "ufw" | "firewalld" | "nftables" | null;
 
@@ -116,9 +122,7 @@ async function verify(ctx: RemediationContext): Promise<VerificationResult> {
     observed = `firewalld running: ${String(passed)}`;
   }
   return {
-    schemaVersion: 1,
     verificationId: newVerificationId(),
-    serverId: ctx.serverId,
     timestamp: ctx.now(),
     target: kind ?? "firewall",
     check: "host firewall active",
@@ -170,7 +174,7 @@ async function apply(ctx: RemediationContext): Promise<RemediationApplyResult> {
   };
 }
 
-async function rollback(ctx: RemediationContext, change: ChangeRecord): Promise<RemediationApplyResult> {
+async function rollback(ctx: RemediationContext, change: AppliedChange): Promise<RemediationApplyResult> {
   const before = JSON.parse(change.before ?? "{}") as { implementation?: string; active?: boolean | null };
   if (before.active !== false) {
     return {

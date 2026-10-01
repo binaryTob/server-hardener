@@ -4,9 +4,15 @@
  * Unrecognised services are never touched. Rollback re-enables/re-starts a unit
  * based on the state recorded before the change.
  */
-import type { ChangeRecord, VerificationResult } from "../models";
-import { newVerificationId } from "../state";
-import type { Remediation, RemediationApplyResult, RemediationContext, RemediationPreview } from "./types";
+import type { VerificationResult } from "../models";
+import { newVerificationId } from "../store";
+import type {
+  AppliedChange,
+  Remediation,
+  RemediationApplyResult,
+  RemediationContext,
+  RemediationPreview,
+} from "./types";
 
 export const SERVICE_UNIT_PATTERN = /^[a-zA-Z0-9_.@:-]+\.(service|socket|timer)$/;
 
@@ -130,9 +136,7 @@ async function verify(ctx: RemediationContext): Promise<VerificationResult> {
     evidence.push(`${unit}: enabled=${String(state.enabled)} active=${String(state.active)}`);
   }
   return {
-    schemaVersion: 1,
     verificationId: newVerificationId(),
-    serverId: ctx.serverId,
     timestamp: ctx.now(),
     target: units.join(", ") || ctx.control.controlId,
     check: "target services disabled and inactive",
@@ -144,7 +148,7 @@ async function verify(ctx: RemediationContext): Promise<VerificationResult> {
   };
 }
 
-async function rollback(ctx: RemediationContext, change: ChangeRecord): Promise<RemediationApplyResult> {
+async function rollback(ctx: RemediationContext, change: AppliedChange): Promise<RemediationApplyResult> {
   const before = JSON.parse(change.before ?? "{}") as { units?: UnitState[] };
   const units = before.units ?? [];
   for (const unit of units) {
