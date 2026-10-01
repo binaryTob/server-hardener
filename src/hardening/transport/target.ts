@@ -4,7 +4,7 @@
  * Accepted forms:
  *   - ssh config alias:  db.example
  *   - user@hostname:     admin@server.example
- *   - user@ip:           root@server.example
+ *   - user@ip:           admin@server.example
  *   - bare host/ip:      server / 192.0.2.10
  *
  * Validation is strict to avoid option injection (a target starting with "-")

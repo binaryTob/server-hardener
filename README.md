@@ -37,7 +37,7 @@ Luego:
 ```text
 > Hardenizá db.example
 > Hardenizá admin@192.0.2.10
-> Hardenizá root@server.example
+> Hardenizá admin@server.example
 ```
 
 El agente:

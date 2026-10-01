@@ -27,7 +27,7 @@ describe("target validation", () => {
   test("accepts alias, user@host, user@ip and bare host", () => {
     expect(parseTarget("db.example").host).toBe("db.example");
     expect(parseTarget("admin@server.example").user).toBe("admin");
-    expect(parseTarget("root@server.example").host).toBe("server.example");
+    expect(parseTarget("admin@server.example").host).toBe("server.example");
     expect(parseTarget("192.0.2.10").isLocalhost).toBe(false);
     expect(parseTarget("localhost").isLocalhost).toBe(true);
   });
