@@ -20,16 +20,27 @@ import {
 import { assertSafeCommand, ExecCommandRunner } from "../src/hardening/exec";
 import { assertSafeId } from "../src/hardening/store";
 import { buildRemoteCommand } from "../src/hardening/transport/quote";
-import { buildSshArgv, classifySshFailure } from "../src/hardening/transport/ssh";
+import { buildSshArgv, classifyRemoteResult, classifySshFailure } from "../src/hardening/transport/ssh";
 import { parseTarget } from "../src/hardening/transport/target";
 
 describe("target validation", () => {
   test("accepts alias, user@host, user@ip and bare host", () => {
     expect(parseTarget("db.example").host).toBe("db.example");
     expect(parseTarget("admin@server.example").user).toBe("admin");
-    expect(parseTarget("admin@server.example").host).toBe("server.example");
+    expect(parseTarget("admin@192.0.2.10").host).toBe("192.0.2.10");
     expect(parseTarget("192.0.2.10").isLocalhost).toBe(false);
     expect(parseTarget("localhost").isLocalhost).toBe(true);
+  });
+
+  test("supports a non-standard port", () => {
+    const spec = parseTarget("root@192.0.2.10:2222");
+    expect(spec.host).toBe("192.0.2.10");
+    expect(spec.port).toBe(2222);
+    expect(parseTarget("[2001:db8::1]:2222").port).toBe(2222);
+    expect(parseTarget("192.0.2.10").port).toBeNull();
+    for (const bad of ["host:0", "host:70000", "host:abc"]) {
+      expect(() => parseTarget(bad)).toThrow(TargetValidationError);
+    }
   });
 
   test("rejects injection and option-shaped targets", () => {
@@ -64,6 +75,12 @@ describe("safe ssh argv", () => {
     expect(argv.at(-1)).toBe("sudo -n 'sysctl' '-w' 'kernel.randomize_va_space=2'");
   });
 
+  test("non-standard port is passed with -p", () => {
+    const argv = buildSshArgv("root@192.0.2.10", ["true"], false, 2222);
+    expect(argv).toContain("-p");
+    expect(argv).toContain("2222");
+  });
+
   test("quoting neutralises shell metacharacters in args", () => {
     expect(buildRemoteCommand(["printf", "%s", "$(whoami); `id`"])).toBe("'printf' '%s' '$(whoami); `id`'");
     expect(buildRemoteCommand(["echo", "it's"])).toBe("'echo' 'it'\\''s'");
@@ -76,6 +93,18 @@ describe("ssh failure classification", () => {
     expect(classifySshFailure("Permission denied (publickey).", false)).toBe("auth");
     expect(classifySshFailure("ssh: Could not resolve hostname x", false)).toBe("connection");
     expect(classifySshFailure("", true)).toBe("timeout");
+  });
+
+  test("remote command results degrade like the local runner", () => {
+    expect(classifyRemoteResult(127, "bash: line 1: rpm: command not found").status).toBe("unavailable");
+    expect(classifyRemoteResult(126, "bash: line 1: /x: Permission denied").status).toBe(
+      "insufficient-permissions",
+    );
+    expect(classifyRemoteResult(1, "cat: /etc/shadow: Permission denied").status).toBe(
+      "insufficient-permissions",
+    );
+    expect(classifyRemoteResult(255, "Host key verification failed.").failureKind).toBe("host-key");
+    expect(classifyRemoteResult(1, "some other failure").status).toBe("error");
   });
 });
 

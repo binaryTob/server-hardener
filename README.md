@@ -20,8 +20,9 @@ SSH es solo el transporte de las tools. No es fleet management ni multi-servidor
 ## Requisitos
 
 - [Bun](https://bun.sh) ≥ 1.4 **en la workstation**.
-- Acceso SSH al target (alias de `~/.ssh/config`, `user@host` o `user@IP`),
-  con ssh-agent/claves y `known_hosts` configurados normalmente.
+- Acceso SSH al target (alias de `~/.ssh/config`, `user@host`, `user@IP`, y
+  `host:puerto` para puertos no estándar), con ssh-agent/claves y `known_hosts`
+  configurados normalmente.
 - En el target: root por SSH o un usuario admin con `sudo -n` sin password.
 
 ## Uso
@@ -38,6 +39,7 @@ Luego:
 > Hardenizá db.example
 > Hardenizá admin@192.0.2.10
 > Hardenizá admin@server.example
+> Hardenizá root@192.0.2.10:2222     # puerto no estándar
 ```
 
 El agente:

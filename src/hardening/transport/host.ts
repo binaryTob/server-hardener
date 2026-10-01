@@ -25,6 +25,8 @@ export interface HostExecOptions {
   sudo?: boolean;
   stdin?: string;
   timeoutMs?: number;
+  /** Force a brand-new connection (no multiplexing). Used for reconnect checks. */
+  fresh?: boolean;
 }
 
 export interface Host extends CommandRunner, FileReader {

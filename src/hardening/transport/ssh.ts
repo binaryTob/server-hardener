@@ -12,8 +12,11 @@
  *   the operation fails and the operator is told.
  */
 import { type ChildProcessWithoutNullStreams, spawn as nodeSpawn } from "node:child_process";
+import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import path from "node:path";
 import { TransportError } from "../errors";
-import { assertSafeCommand, type CommandOutcome } from "../exec";
+import { assertSafeCommand, type CommandOutcome, type CommandStatus } from "../exec";
 import type { DirRead, FileRead } from "../fsio";
 import type { Host, HostExecOptions, HostFileStat } from "./host";
 import { buildRemoteCommand } from "./quote";
@@ -25,6 +28,10 @@ export interface SshHostOptions {
   sshBinary?: string;
   timeoutMs?: number;
   spawn?: typeof nodeSpawn;
+  /** Reuse one connection (ControlMaster). Default true; avoids rate limiting. */
+  multiplex?: boolean;
+  /** Override the ssh ControlPath; "disabled" forces a fresh connection. */
+  controlPath?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -39,9 +46,11 @@ export function classifySshFailure(stderr: string, killed: boolean): SshFailureK
     return "host-key";
   }
   if (
-    text.includes("permission denied") ||
+    text.includes("permission denied (publickey") ||
+    text.includes("permission denied (password") ||
     text.includes("authentication failed") ||
-    text.includes("no supported authentication")
+    text.includes("no supported authentication") ||
+    text.includes("too many authentication failures")
   ) {
     return "auth";
   }
@@ -49,13 +58,32 @@ export function classifySshFailure(stderr: string, killed: boolean): SshFailureK
     text.includes("could not resolve hostname") ||
     text.includes("connection refused") ||
     text.includes("connection timed out") ||
+    text.includes("connection reset") ||
     text.includes("no route to host") ||
     text.includes("network is unreachable") ||
-    text.includes("operation timed out")
+    text.includes("operation timed out") ||
+    text.includes("kex_exchange_identification")
   ) {
     return "connection";
   }
   return "error";
+}
+
+/**
+ * Classify the result of a remote COMMAND (not the ssh transport). A missing
+ * binary or a denied file must degrade to `unavailable` /
+ * `insufficient-permissions`, exactly like the local runner, so parsers behave
+ * the same over SSH.
+ */
+export function classifyRemoteResult(
+  exitCode: number | null,
+  stderr: string,
+): { status: CommandStatus; failureKind?: SshFailureKind } {
+  const kind = classifySshFailure(stderr, false);
+  if (kind !== "error") return { status: "error", failureKind: kind };
+  if (exitCode === 127 || /command not found/i.test(stderr)) return { status: "unavailable" };
+  if (exitCode === 126 || /permission denied/i.test(stderr)) return { status: "insufficient-permissions" };
+  return { status: "error" };
 }
 
 export function sshBaseArgs(): string[] {
@@ -65,11 +93,29 @@ export function sshBaseArgs(): string[] {
 /**
  * Build the local `ssh` argv for a fixed remote command. `ssh` is spawned with
  * this array; no local shell is involved, and the remote command is quoted.
+ *
+ * `controlPath`:
+ *  - a path  -> reuse one multiplexed connection (ControlMaster);
+ *  - "disabled" -> force a brand-new connection (used for reconnect checks);
+ *  - null     -> no multiplexing options added.
  */
-export function buildSshArgv(destination: string, remoteArgv: string[], sudo: boolean): string[] {
+export function buildSshArgv(
+  destination: string,
+  remoteArgv: string[],
+  sudo: boolean,
+  port: number | null = null,
+  controlPath: string | "disabled" | null = null,
+): string[] {
   const base = buildRemoteCommand(remoteArgv);
   const remote = sudo ? `sudo -n ${base}` : base;
-  return [...sshBaseArgs(), destination, "--", remote];
+  const portArgs = port === null ? [] : ["-p", String(port)];
+  const controlArgs =
+    controlPath === null
+      ? []
+      : controlPath === "disabled"
+        ? ["-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no"]
+        : ["-o", "ControlMaster=auto", "-o", `ControlPath=${controlPath}`, "-o", "ControlPersist=60"];
+  return [...sshBaseArgs(), ...controlArgs, ...portArgs, destination, "--", remote];
 }
 
 export class SshHost implements Host {
@@ -78,21 +124,51 @@ export class SshHost implements Host {
   readonly isLocalhost = false;
   readonly label: string;
   private readonly destination: string;
+  private readonly port: number | null;
+  private readonly controlPath: string | null;
+  private controlDirReady = false;
   private readonly sshBinary: string;
   private readonly timeoutMs: number;
   private readonly spawn: typeof nodeSpawn;
 
   constructor(spec: TargetSpec, options: SshHostOptions = {}) {
     this.destination = sshDestination(spec);
+    this.port = spec.port;
     this.label = this.destination;
+    this.controlPath =
+      options.controlPath !== undefined
+        ? options.controlPath === "disabled"
+          ? null
+          : options.controlPath
+        : options.multiplex === false
+          ? null
+          : path.join(homedir(), ".ssh", "server-hardener-%r@%h:%p");
     this.sshBinary = options.sshBinary ?? "ssh";
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.spawn = options.spawn ?? nodeSpawn;
   }
 
+  private async ensureControlDir(): Promise<void> {
+    if (this.controlDirReady || this.controlPath === null) return;
+    try {
+      await mkdir(path.join(homedir(), ".ssh"), { recursive: true });
+    } catch {
+      // If we cannot prepare the control dir, fall back to fresh connections.
+    }
+    this.controlDirReady = true;
+  }
+
   async exec(command: string, args: string[], options: HostExecOptions = {}): Promise<CommandOutcome> {
     assertSafeCommand(command, args);
-    const sshArgs = buildSshArgv(this.destination, [command, ...args], options.sudo === true);
+    const controlPath: string | "disabled" | null = options.fresh === true ? "disabled" : this.controlPath;
+    if (controlPath !== null && controlPath !== "disabled") await this.ensureControlDir();
+    const sshArgs = buildSshArgv(
+      this.destination,
+      [command, ...args],
+      options.sudo === true,
+      this.port,
+      controlPath,
+    );
     return this.spawnSsh(sshArgs, options.stdin, options.timeoutMs ?? this.timeoutMs);
   }
 
@@ -148,12 +224,16 @@ export class SshHost implements Host {
           resolve({ status: "ok", stdout, stderr, exitCode, notRun: false });
           return;
         }
-        const kind = classifySshFailure(stderr, false);
-        const status =
-          kind === "error" && stderr.toLowerCase().includes("permission denied")
-            ? "insufficient-permissions"
-            : "error";
-        resolve({ status, stdout, stderr, exitCode, notRun: false, failureKind: kind });
+        const classified = classifyRemoteResult(exitCode, stderr);
+        const outcome: CommandOutcome = {
+          status: classified.status,
+          stdout,
+          stderr,
+          exitCode,
+          notRun: false,
+        };
+        if (classified.failureKind !== undefined) outcome.failureKind = classified.failureKind;
+        resolve(outcome);
       });
       if (stdin !== undefined) child.stdin.write(stdin);
       child.stdin.end();
@@ -261,7 +341,8 @@ export class SshHost implements Host {
   }
 
   async verifyConnection(): Promise<CommandOutcome> {
-    return this.exec("true", []);
+    // A NEW connection: ignore any multiplexed master.
+    return this.exec("true", [], { fresh: true });
   }
 
   async homeDir(): Promise<string | null> {
