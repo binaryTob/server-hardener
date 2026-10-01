@@ -5,6 +5,7 @@
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { OBSERVED_UNITS } from "../src/hardening/collectors/linux";
 import type { CommandOutcome, CommandRunner } from "../src/hardening/exec";
 import type { DirRead, FileRead, FileReader } from "../src/hardening/fsio";
 
@@ -142,7 +143,18 @@ export function runnerEntries(): Record<string, CommandOutcome | string> {
     "systemctl list-units": ok(loadFixture("systemctl-list-units.txt")),
     "systemctl list-unit-files": ok(loadFixture("systemctl-unit-files.txt")),
     "systemctl is-active": ok(loadFixture("systemctl-is-active.txt")),
-    "systemctl is-enabled": ok(loadFixture("systemctl-is-enabled.txt")),
+    // is-enabled is queried per unit (see collectEnabledStates).
+    ...Object.fromEntries(
+      OBSERVED_UNITS.map((unit, index) => [
+        `systemctl is-enabled ${unit}`,
+        ok(
+          loadFixture("systemctl-is-enabled.txt")
+            .split("\n")
+            .map((l) => l.trim())
+            .filter((l) => l.length > 0)[index] ?? "not-found",
+        ),
+      ]),
+    ),
     "dpkg-query -W": ok(loadFixture("dpkg-query.txt")),
     "rpm -qa": ok(""),
     findmnt: ok(loadFixture("findmnt.txt")),

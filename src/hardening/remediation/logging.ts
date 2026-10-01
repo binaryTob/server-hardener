@@ -237,8 +237,10 @@ function makeEnableRemediation(controlId: string, unit: string, check: string): 
       await ctx.runner.run("systemctl", ["enable", "--now", unit]);
       const active = await unitActive(ctx, unit);
       const enabled = await unitEnabled(ctx, unit);
+      const changed =
+        (active === true && beforeActive !== true) || (enabled === true && beforeEnabled !== true);
       return {
-        changed: beforeActive !== true,
+        changed,
         target: unit,
         before: JSON.stringify({ unit, enabled: beforeEnabled, active: beforeActive }),
         after: JSON.stringify({ unit, enabled, active }),
@@ -246,7 +248,9 @@ function makeEnableRemediation(controlId: string, unit: string, check: string): 
         verification: verification(ctx, unit, active, enabled, check),
         strategy: "restore-service-state",
         reversible: true,
-        message: `${unit} enabled and started`,
+        message: changed
+          ? `${unit} enabled and started`
+          : `${unit}: no change applied (unit may not exist or was already enabled/active)`,
       };
     },
     verify: async (ctx) =>

@@ -127,6 +127,7 @@ export class SshHost implements Host {
   private readonly port: number | null;
   private readonly controlPath: string | null;
   private controlDirReady = false;
+  private rootKnown: boolean | null = null;
   private readonly sshBinary: string;
   private readonly timeoutMs: number;
   private readonly spawn: typeof nodeSpawn;
@@ -176,8 +177,22 @@ export class SshHost implements Host {
     return this.exec(command, args);
   }
 
-  runPrivileged(command: string, args: string[]): Promise<CommandOutcome> {
-    return this.exec(command, args, { sudo: true });
+  /** True when the remote login user is already root (no sudo needed). */
+  private async isRootUser(): Promise<boolean> {
+    if (this.rootKnown === null) {
+      const outcome = await this.exec("id", ["-u"]);
+      this.rootKnown = outcome.status === "ok" && outcome.stdout.trim() === "0";
+    }
+    return this.rootKnown;
+  }
+
+  /** Whether privileged operations should be prefixed with `sudo -n`. */
+  private async useSudo(): Promise<boolean> {
+    return !(await this.isRootUser());
+  }
+
+  async runPrivileged(command: string, args: string[]): Promise<CommandOutcome> {
+    return this.exec(command, args, { sudo: await this.useSudo() });
   }
 
   private spawnSsh(sshArgs: string[], stdin: string | undefined, timeoutMs: number): Promise<CommandOutcome> {
@@ -248,8 +263,8 @@ export class SshHost implements Host {
     return { ok: false, status: readFailure(outcome) };
   }
 
-  readTextPrivileged(file: string): Promise<FileRead> {
-    return this.readTextWith(file, true);
+  async readTextPrivileged(file: string): Promise<FileRead> {
+    return this.readTextWith(file, await this.useSudo());
   }
 
   private async readTextWith(file: string, sudo: boolean): Promise<FileRead> {
@@ -287,8 +302,8 @@ export class SshHost implements Host {
     await this.writeTextWith(file, content, mode, false);
   }
 
-  writeTextPrivileged(file: string, content: string, mode?: number): Promise<void> {
-    return this.writeTextWith(file, content, mode ?? 0o644, true);
+  async writeTextPrivileged(file: string, content: string, mode?: number): Promise<void> {
+    return this.writeTextWith(file, content, mode ?? 0o644, await this.useSudo());
   }
 
   private async writeTextWith(file: string, content: string, mode: number, sudo: boolean): Promise<void> {
@@ -313,26 +328,25 @@ export class SshHost implements Host {
   }
 
   async chmod(file: string, mode: number): Promise<void> {
-    await this.exec("chmod", [mode.toString(8), "--", file], { sudo: true });
+    await this.exec("chmod", [mode.toString(8), "--", file], { sudo: await this.useSudo() });
   }
 
   async chown(file: string, uid: number, gid: number): Promise<void> {
-    await this.exec("chown", [`${uid}:${gid}`, "--", file], { sudo: true });
+    await this.exec("chown", [`${uid}:${gid}`, "--", file], { sudo: await this.useSudo() });
   }
 
   async mkdirpPrivileged(dir: string): Promise<void> {
-    await this.exec("mkdir", ["-p", "--", dir], { sudo: true });
+    await this.exec("mkdir", ["-p", "--", dir], { sudo: await this.useSudo() });
   }
 
   async removePrivileged(file: string): Promise<void> {
-    await this.exec("rm", ["-f", "--", file], { sudo: true });
+    await this.exec("rm", ["-f", "--", file], { sudo: await this.useSudo() });
   }
 
   // --- Probe ---------------------------------------------------------------
 
   async isRoot(): Promise<boolean> {
-    const outcome = await this.exec("id", ["-u"]);
-    return outcome.status === "ok" && outcome.stdout.trim() === "0";
+    return this.isRootUser();
   }
 
   async sudoAvailable(): Promise<boolean> {

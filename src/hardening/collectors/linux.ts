@@ -152,6 +152,32 @@ async function run(runner: CommandRunner, command: string, args: string[]): Prom
 }
 
 /**
+ * Collect `systemctl is-enabled` per unit and aggregate in OBSERVED_UNITS order.
+ * A single multi-unit call truncates on some systemd versions and would
+ * misalign results.
+ */
+async function collectEnabledStates(runner: CommandRunner): Promise<RawCommand> {
+  const outcomes = await Promise.all(
+    OBSERVED_UNITS.map((unit) => runner.run("systemctl", ["is-enabled", unit])),
+  );
+  const display = "systemctl is-enabled <units...>";
+  if (outcomes.every((outcome) => outcome.notRun)) {
+    return {
+      display,
+      outcome: { status: "unavailable", stdout: "", stderr: "", exitCode: null, notRun: true },
+    };
+  }
+  const lines = outcomes.map((outcome) => {
+    const line = outcome.stdout.trim().split("\n")[0]?.trim();
+    return line && line.length > 0 ? line : "unknown";
+  });
+  return {
+    display,
+    outcome: { status: "ok", stdout: lines.join("\n"), stderr: "", exitCode: 0, notRun: false },
+  };
+}
+
+/**
  * Collect all raw Linux discovery data. Never throws for per-command failures;
  * only a total runner failure can reject (handled by the orchestrator).
  */
@@ -187,7 +213,7 @@ export async function collectLinuxRaw(deps: CollectorDependencies): Promise<Linu
   const sudoersDir = await files.readDir("/etc/sudoers.d");
 
   const systemdRunning = await files.exists("/run/systemd/system");
-  const [systemctlUnits, systemctlUnitFiles, isActive, isEnabled] = await Promise.all([
+  const [systemctlUnits, systemctlUnitFiles, isActive] = await Promise.all([
     run(runner, "systemctl", [
       "list-units",
       "--type=service",
@@ -198,8 +224,11 @@ export async function collectLinuxRaw(deps: CollectorDependencies): Promise<Linu
     ]),
     run(runner, "systemctl", ["list-unit-files", "--type=service", "--no-legend", "--no-pager", "--plain"]),
     run(runner, "systemctl", ["is-active", ...OBSERVED_UNITS]),
-    run(runner, "systemctl", ["is-enabled", ...OBSERVED_UNITS]),
   ]);
+  // `systemctl is-enabled a b c...` truncates early on some systemd versions,
+  // which would misalign results against the requested units. Query each unit
+  // individually and aggregate the answers in the same order.
+  const isEnabled = await collectEnabledStates(runner);
 
   const [dpkgQuery, rpmQuery] = await Promise.all([
     // biome-ignore lint/suspicious/noTemplateCurlyInString: dpkg-query placeholders are literal and must reach dpkg untouched
