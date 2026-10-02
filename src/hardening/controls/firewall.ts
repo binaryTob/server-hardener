@@ -9,6 +9,7 @@
 import {
   applicable,
   compliant,
+  managementPorts,
   nonCompliant,
   ref,
   requiresContext,
@@ -178,7 +179,7 @@ export const firewallControls: ControlDefinition[] = [
           }
         : applicable("listening sockets are available in the inventory"),
     assess: (inv, ctx) => {
-      const knownAdminPorts = new Set([22, 6443, 10250, 2376]);
+      const knownAdminPorts = new Set<number>([...managementPorts(inv, ctx), 6443, 10250, 2376]);
       const adminSockets = (inv.sockets.data?.sockets ?? []).filter(
         (s) => s.port !== null && knownAdminPorts.has(s.port),
       );

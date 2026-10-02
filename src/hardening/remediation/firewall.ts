@@ -7,6 +7,7 @@
  * implementation already present. It never replaces one firewall with another.
  * nftables rule generation is deliberately NOT automated.
  */
+import { managementPorts } from "../controls/helpers";
 import type { VerificationResult } from "../models";
 import { newVerificationId } from "../store";
 import type {
@@ -28,11 +29,8 @@ function implementation(ctx: RemediationContext): FirewallKind {
 }
 
 function administrativePorts(ctx: RemediationContext): number[] {
-  const ports = new Set<number>();
-  for (const socket of ctx.inventory.sockets.data?.sockets ?? []) {
-    if (socket.port !== null && socket.port === 22) ports.add(22);
-  }
-  return [...ports];
+  // Use the operator-declared / observed SSH ports; never assume 22.
+  return managementPorts(ctx.inventory, ctx.context);
 }
 
 async function ufwActive(ctx: RemediationContext): Promise<boolean | null> {

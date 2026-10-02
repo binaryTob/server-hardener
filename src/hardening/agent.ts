@@ -27,6 +27,7 @@ import {
   readLastRun,
   readSession,
   type SessionInfo,
+  saveContext,
   writeSession,
 } from "./store";
 import { createHost, type Host, type HostFactoryOptions, probeHost } from "./transport/host";
@@ -124,6 +125,17 @@ export async function connectTarget(
     isLocalhost: spec.isLocalhost,
   };
   await writeSession(storeRoot, info);
+  if (spec.port !== null) {
+    const stored = await readContext(storeRoot);
+    if (stored === null || (stored.management.sshPort ?? null) === null) {
+      const base = stored ?? emptyContext(now(deps));
+      await saveContext(storeRoot, {
+        ...base,
+        management: { ...base.management, sshPort: spec.port },
+        updatedAt: now(deps),
+      });
+    }
+  }
   return { host, spec, info, connectionMessage: "SSH connection OK." };
 }
 
@@ -166,7 +178,10 @@ async function assessHost(
 ): Promise<Assessment> {
   const inventory = await runDiscovery({ runner: host, files: host, platform: host.platformHint });
   const stored = await readContext(storeRoot);
-  const context = withDetectedRoles(stored ?? emptyContext(now(deps)), inventory);
+  let context = withDetectedRoles(stored ?? emptyContext(now(deps)), inventory);
+  if ((context.management.sshPort ?? null) === null && spec.port !== null) {
+    context = { ...context, management: { ...context.management, sshPort: spec.port } };
+  }
   const { controls, byTier } = evaluateCatalog(CONTROL_CATALOG, inventory, context);
   const questions = buildQuestions(missingContextByPath(controls));
   const probe = await probeHost(host);

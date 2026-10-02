@@ -4,6 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { CONTROL_CATALOG, validateCatalog } from "../src/hardening/controls/catalog";
+import { managementPorts } from "../src/hardening/controls/helpers";
 import { decideApplicability } from "../src/hardening/planning/applicability";
 import { emptyContext } from "../src/hardening/planning/context";
 import { classifyTier, evaluateCatalog, evaluateControl } from "../src/hardening/planning/evaluate";
@@ -115,5 +116,20 @@ describe("preconditions", () => {
     const control = evaluateControl(mustControl("SSH-002"), inventory, emptyContext(NOW));
     expect(control.status).toBe("requires-context");
     expect(control.missingContext).toContain("management.secondaryPathConfirmed");
+  });
+});
+
+describe("management ports", () => {
+  test("includes the configured ssh port and observed sshd ports (never assume 22)", async () => {
+    const inventory = await sampleInventory();
+    const context = { ...sampleContext(), management: { ...sampleContext().management, sshPort: 2222 } };
+    const ports = managementPorts(inventory, context);
+    expect(ports).toContain(2222);
+  });
+
+  test("falls back to observed sshd ports when no port is configured", async () => {
+    const inventory = await sampleInventory();
+    const context = sampleContext();
+    expect(managementPorts(inventory, context)).toContain(22);
   });
 });

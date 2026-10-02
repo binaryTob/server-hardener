@@ -428,6 +428,8 @@ export interface OperationalContext {
   roles: RoleAssignment[];
   management: {
     methods: ManagementMethod[];
+    /** Administrative SSH port(s) actually used; null when unknown. */
+    sshPort?: number | null;
     secondaryPathConfirmed: boolean | null;
     consoleAccess: boolean | null;
   };

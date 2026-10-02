@@ -26,7 +26,7 @@ export function emptyContext(updatedAt: string): OperationalContext {
     criticality: "unknown",
     internetExposure: "unknown",
     roles: [],
-    management: { methods: [], secondaryPathConfirmed: null, consoleAccess: null },
+    management: { methods: [], sshPort: null, secondaryPathConfirmed: null, consoleAccess: null },
     networks: { administrative: [], service: [] },
     reboot: { allowed: null, maintenanceWindowAvailable: null },
     highAvailability: null,
@@ -236,6 +236,15 @@ export function applyContextPath(
         ...context,
         management: { ...context.management, consoleAccess: asBoolean(path, value) },
       };
+    case "management.sshPort": {
+      if (value === null) {
+        return { ...context, management: { ...context.management, sshPort: null } };
+      }
+      if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 65535) {
+        throw new AssessmentError('context "management.sshPort" expects a port number or null');
+      }
+      return { ...context, management: { ...context.management, sshPort: value } };
+    }
     case "networks.administrative":
       return { ...context, networks: { ...context.networks, administrative: asStringArray(path, value) } };
     case "networks.service":

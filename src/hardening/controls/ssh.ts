@@ -15,6 +15,7 @@ import {
   alternativeAdminUserPrecondition,
   applicable,
   consoleAccessPrecondition,
+  managementPorts,
   missingEvidence,
   notApplicable,
   privilegeEscalationPrecondition,
@@ -235,7 +236,10 @@ export const sshControls: ControlDefinition[] = [
     },
     applicability: (inv) => sshApplicability(inv),
     assess: (inv, ctx) => {
-      const sshSockets = (inv.sockets.data?.sockets ?? []).filter((s) => s.port === 22);
+      const adminPorts = new Set(managementPorts(inv, ctx));
+      const sshSockets = (inv.sockets.data?.sockets ?? []).filter(
+        (s) => s.port !== null && adminPorts.has(s.port),
+      );
       const wildcard = sshSockets.filter((s) => s.scope === "wildcard");
       const scopeText =
         sshSockets.length === 0

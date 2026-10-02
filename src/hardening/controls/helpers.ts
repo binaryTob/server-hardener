@@ -149,6 +149,23 @@ export function uidZeroUsers(inv: ServerInventory): InventoryUser[] {
   return users(inv).filter((u) => u.uid === 0);
 }
 
+/**
+ * Administrative SSH ports: the operator-declared port (context) plus any port
+ * observed with an sshd process. Never assume 22 when the real port is known.
+ */
+export function managementPorts(inv: ServerInventory, ctx: OperationalContext): number[] {
+  const ports = new Set<number>();
+  const configured = ctx.management.sshPort ?? null;
+  if (configured !== null) ports.add(configured);
+  for (const socket of sockets(inv)) {
+    if (socket.port !== null && socket.processName !== null && /ssh/i.test(socket.processName)) {
+      ports.add(socket.port);
+    }
+  }
+  if (ports.size === 0) ports.add(22);
+  return [...ports].sort((a, b) => a - b);
+}
+
 export function isInteractiveShell(user: InventoryUser): boolean {
   const shell = user.shell ?? "";
   return !(shell.endsWith("nologin") || shell.endsWith("false") || shell === "");

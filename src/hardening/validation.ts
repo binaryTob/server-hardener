@@ -350,6 +350,7 @@ export const operationalContextSchema = z
     roles: z.array(roleAssignmentSchema),
     management: z.object({
       methods: z.array(managementMethodSchema),
+      sshPort: z.number().int().min(1).max(65535).nullable().optional(),
       secondaryPathConfirmed: z.boolean().nullable(),
       consoleAccess: z.boolean().nullable(),
     }),

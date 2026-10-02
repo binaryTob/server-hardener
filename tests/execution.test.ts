@@ -148,6 +148,18 @@ describe("firewall safety", () => {
     expect(outcome.changed).toBe(false);
   });
 
+  test("ufw allows the configured administrative port, not 22 by default", async () => {
+    const current = await env();
+    const inventory = structuredClone(current.inventory);
+    if (inventory.securityControls.data?.firewall) {
+      inventory.securityControls.data.firewall.detectedImplementations = ["ufw"];
+    }
+    const context = { ...current.context, management: { ...current.context.management, sshPort: 2222 } };
+    const control = withStatus(evaluate("FW-001", inventory, context), "non-compliant");
+    const preview = await previewControl({ ...request(current, control), inventory, context });
+    expect(preview.preview?.commands.join(" ")).toContain("ufw allow 2222/tcp");
+  });
+
   test("ufw is enabled without closing administrative access", async () => {
     const current = await env();
     const inventory = structuredClone(current.inventory);
