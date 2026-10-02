@@ -335,6 +335,7 @@ export async function makeExecEnv(): Promise<ExecEnv> {
     "/etc/ssh/sshd_config":
       "# test sshd_config\nPermitRootLogin yes\nPasswordAuthentication yes\nX11Forwarding yes\nMaxAuthTries 6\n",
     "/etc/fstab": "/dev/sda2 / ext4 defaults 0 1\n/dev/sda3 /tmp ext4 defaults 0 2\n",
+    "/etc/ssh/sshd_config.d/90-puertos.conf": "Port 22\nPort 2222\n",
   });
   host.services.set("ssh.service", { enabled: true, active: true });
   host.sysctl.set("kernel.randomize_va_space", "0");

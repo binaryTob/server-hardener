@@ -111,6 +111,25 @@ describe("SSH apply / verify / rollback", () => {
   });
 });
 
+describe("SSH-007 removes unauthorized ports", () => {
+  test("apply removes Port 22 and keeps the authorized port, then rollback restores it", async () => {
+    const current = await env();
+    const context = { ...current.context, management: { ...current.context.management, sshPort: 2222 } };
+    const control = withStatus(evaluate("SSH-007", current.inventory, context), "non-compliant");
+    const includePath = "/etc/ssh/sshd_config.d/90-puertos.conf";
+
+    const applied = await applyControl({ ...request(current, control), context });
+    expect(applied.changed).toBe(true);
+    const after = current.host.files.get(includePath) ?? "";
+    expect(after).toContain("Port 2222");
+    expect(after).not.toMatch(/^Port 22$/m);
+
+    const rolled = await rollbackControl({ ...request(current, control), context });
+    expect(rolled.changed).toBe(true);
+    expect(current.host.files.get(includePath)).toContain("Port 22");
+  });
+});
+
 describe("sysctl", () => {
   test("apply sets runtime value and persists a managed drop-in", async () => {
     const current = await env();

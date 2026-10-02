@@ -14,7 +14,7 @@ import type { PreconditionCheck, PreconditionSpec } from "../controls/types";
 import type { VerificationResult } from "../models";
 import { newVerificationId } from "../store";
 import { readDirective, upsertDirective } from "./config";
-import { createBackup, readConfig, restoreBackup, writeConfig } from "./fsops";
+import { createBackup, listDir, readConfig, restoreBackup, writeConfig } from "./fsops";
 import type {
   AppliedChange,
   Remediation,
@@ -266,18 +266,208 @@ function refused(ctx: RemediationContext, reason: string): RemediationApplyResul
   };
 }
 
-export const sshRemediations: Record<string, Remediation> = Object.fromEntries(
-  Object.keys(SSH_CONTROLS).map((id) => [
-    id,
-    {
-      controlId: id,
+// --- SSH-007: expose only the authorized administrative port(s) -------------
+
+const SSH_PORT_RE = /^\s*Port\s+(\d+)\s*(#.*)?$/i;
+
+function removeUnauthorizedPorts(content: string, allowed: number[]): { content: string; removed: number[] } {
+  const removed: number[] = [];
+  const kept = content.split("\n").filter((line) => {
+    const match = SSH_PORT_RE.exec(line);
+    if (match?.[1]) {
+      const port = Number.parseInt(match[1], 10);
+      if (!allowed.includes(port)) {
+        removed.push(port);
+        return false;
+      }
+    }
+    return true;
+  });
+  return { content: kept.join("\n"), removed };
+}
+
+async function sshConfigFiles(ctx: RemediationContext): Promise<string[]> {
+  const names = await listDir(ctx, "/etc/ssh/sshd_config.d");
+  const includes = names.filter((n) => n.endsWith(".conf")).map((n) => `/etc/ssh/sshd_config.d/${n}`);
+  return [ctx.paths.sshdConfig, ...includes];
+}
+
+function authorizedPort(ctx: RemediationContext): number | null {
+  return ctx.context.management.sshPort ?? null;
+}
+
+const sshPortRemediation: Remediation = {
+  controlId: "SSH-007",
+  requiresRoot: true,
+  manual: false,
+  manualReason: null,
+  preview: async (ctx) => {
+    const authorized = authorizedPort(ctx);
+    const files = await sshConfigFiles(ctx);
+    const declared: string[] = [];
+    for (const file of files) {
+      const text = await readConfig(ctx, file);
+      if (!text) continue;
+      for (const line of text.split("\n")) {
+        const match = SSH_PORT_RE.exec(line);
+        if (match?.[1]) declared.push(`${file}: Port ${match[1]}`);
+      }
+    }
+    const warnings: string[] = [];
+    if (authorized === null)
+      warnings.push("authorized administrative SSH port is unknown; set management.sshPort first");
+    warnings.push("the authorized port is preserved; removing a port still in use would break access");
+    return {
+      controlId: "SSH-007",
+      title: ctx.control.title,
+      manual: authorized === null,
+      manualReason: authorized === null ? "authorized administrative SSH port unknown" : null,
+      currentState: declared.join("; ") || "no Port directives found",
+      desiredState: `only Port ${authorized ?? "?"}`,
+      steps: [
+        "back up each sshd config file that declares an unauthorized Port",
+        `remove Port directives other than ${authorized ?? "?"}`,
+        "validate with sshd -t, reload sshd and confirm a new connection works",
+      ],
+      files: files.map((file) => ({ path: file, willBackup: true })),
+      commands: ["sshd -t", `systemctl reload ${serviceUnit(ctx)}`],
+      warnings,
+      risk: ctx.control.risk,
       requiresRoot: true,
-      manual: false,
-      manualReason: null,
-      preview,
-      apply,
-      verify,
-      rollback,
-    } satisfies Remediation,
-  ]),
-);
+    };
+  },
+  apply: async (ctx) => {
+    const authorized = authorizedPort(ctx);
+    if (authorized === null)
+      return refused(ctx, "authorized administrative SSH port unknown (set management.sshPort)");
+    const files = await sshConfigFiles(ctx);
+    const backups: { path: string; backupId: string }[] = [];
+    const removed: number[] = [];
+    for (const file of files) {
+      const text = await readConfig(ctx, file);
+      if (!text) continue;
+      const result = removeUnauthorizedPorts(text, [authorized]);
+      if (result.removed.length === 0) continue;
+      const backup = await createBackup(ctx, file);
+      backups.push({ path: file, backupId: backup.backupId });
+      await writeConfig(ctx, file, result.content);
+      removed.push(...result.removed);
+    }
+    if (removed.length === 0) {
+      return {
+        changed: false,
+        target: "sshd ports",
+        before: null,
+        after: null,
+        backupIds: [],
+        verification: await sshPortVerify(ctx),
+        strategy: "restore-sshd-port-config",
+        reversible: true,
+        message: "no unauthorized Port directives found",
+      };
+    }
+    const syntax = await ctx.runner.run("sshd", ["-t"]);
+    if (syntax.status !== "ok") {
+      for (const backup of backups) await restoreBackup(ctx, backup.backupId);
+      const verification = await sshPortVerify(ctx);
+      return {
+        changed: false,
+        target: backups.map((b) => b.path).join(", "),
+        before: JSON.stringify({ files: backups, removedPorts: removed }),
+        after: null,
+        backupIds: backups.map((b) => b.backupId),
+        verification: { ...verification, passed: false, error: "sshd -t failed; configuration restored" },
+        strategy: "restore-sshd-port-config",
+        reversible: true,
+        message: `sshd -t failed (${syntax.stderr.trim() || "syntax error"}); backups restored, no change kept`,
+      };
+    }
+    await reloadSsh(ctx);
+    const verification = await sshPortVerify(ctx);
+    return {
+      changed: true,
+      target: backups.map((b) => b.path).join(", "),
+      before: JSON.stringify({ files: backups, removedPorts: removed }),
+      after: JSON.stringify({ authorizedPort: authorized }),
+      backupIds: backups.map((b) => b.backupId),
+      verification,
+      strategy: "restore-sshd-port-config",
+      reversible: true,
+      message: `removed Port ${removed.join(", ")}; kept authorized Port ${authorized}`,
+    };
+  },
+  verify: (ctx) => sshPortVerify(ctx),
+  rollback: async (ctx, change) => {
+    const before = JSON.parse(change.before ?? "{}") as { files?: { path: string; backupId: string }[] };
+    for (const file of before.files ?? []) await restoreBackup(ctx, file.backupId);
+    const syntax = await ctx.runner.run("sshd", ["-t"]);
+    if (syntax.status === "ok") await reloadSsh(ctx);
+    return {
+      changed: (before.files ?? []).length > 0,
+      target: "sshd ports",
+      before: change.after,
+      after: change.before,
+      backupIds: [],
+      verification: await sshPortVerify(ctx),
+      strategy: "restore-sshd-port-config",
+      reversible: true,
+      message: "SSH port configuration restored",
+    };
+  },
+};
+
+async function sshPortVerify(ctx: RemediationContext): Promise<import("../models").VerificationResult> {
+  const authorized = authorizedPort(ctx);
+  const files = await sshConfigFiles(ctx);
+  const offenders: string[] = [];
+  const seen = new Set<number>();
+  for (const file of files) {
+    const text = await readConfig(ctx, file);
+    if (!text) continue;
+    for (const line of text.split("\n")) {
+      const match = SSH_PORT_RE.exec(line);
+      if (!match?.[1]) continue;
+      const port = Number.parseInt(match[1], 10);
+      seen.add(port);
+      if (authorized !== null && port !== authorized) offenders.push(`${file}:${port}`);
+    }
+  }
+  const syntax = await ctx.runner.run("sshd", ["-t"]);
+  const active = await ctx.runner.run("systemctl", ["is-active", serviceUnit(ctx)]);
+  const evidence = [
+    `ports declared: ${[...seen].join(", ") || "none"}`,
+    `sshd -t: ${syntax.status}`,
+    `service: ${active.stdout.trim() || active.status}`,
+  ];
+  const passed = syntax.status === "ok" && active.stdout.trim() === "active" && offenders.length === 0;
+  return {
+    verificationId: newVerificationId(),
+    timestamp: ctx.now(),
+    target: "sshd ports",
+    check: "sshd syntax valid, service active and only the authorized port configured",
+    expected: `only Port ${authorized ?? "authorized"}`,
+    observed: evidence.join("; "),
+    passed,
+    evidence,
+    error: passed ? null : "invalid configuration or unauthorized port present",
+  };
+}
+
+export const sshRemediations: Record<string, Remediation> = {
+  ...Object.fromEntries(
+    Object.keys(SSH_CONTROLS).map((id) => [
+      id,
+      {
+        controlId: id,
+        requiresRoot: true,
+        manual: false,
+        manualReason: null,
+        preview,
+        apply,
+        verify,
+        rollback,
+      } satisfies Remediation,
+    ]),
+  ),
+  "SSH-007": sshPortRemediation,
+};

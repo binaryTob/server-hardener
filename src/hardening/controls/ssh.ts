@@ -14,9 +14,11 @@ import type { ApplicabilityDecision, OperationalContext, RiskLevel, ServerInvent
 import {
   alternativeAdminUserPrecondition,
   applicable,
+  compliant,
   consoleAccessPrecondition,
   managementPorts,
   missingEvidence,
+  nonCompliant,
   notApplicable,
   privilegeEscalationPrecondition,
   ref,
@@ -250,19 +252,14 @@ export const sshControls: ControlDefinition[] = [
           scopeText,
           "the declared administrative networks are required to decide whether the current SSH exposure is acceptable",
           ["networks.administrative", "internetExposure"],
-          [
-            ref(
-              "sockets.data.sockets[port=22]",
-              `${sshSockets.length} listeners, ${wildcard.length} wildcard`,
-            ),
-          ],
+          [ref("sockets.data.sockets[sshd]", `${sshSockets.length} listeners, ${wildcard.length} wildcard`)],
         );
       }
       if (wildcard.length > 0) {
         return {
           status: "non-compliant",
           currentState: scopeText,
-          evidence: [ref("sockets.data.sockets[port=22]", `${wildcard.length} wildcard listeners`)],
+          evidence: [ref("sockets.data.sockets[sshd]", `${wildcard.length} wildcard listeners`)],
           missingContext: [],
           rationale: "SSH listens on a wildcard address while administrative networks are declared",
         };
@@ -270,12 +267,65 @@ export const sshControls: ControlDefinition[] = [
       return {
         status: "compliant",
         currentState: scopeText,
-        evidence: [ref("sockets.data.sockets[port=22]", "no wildcard listeners")],
+        evidence: [ref("sockets.data.sockets[sshd]", "no wildcard listeners")],
         missingContext: [],
         rationale: "SSH does not listen on a wildcard address",
       };
     },
     preconditions: () => [secondaryManagementPathPrecondition(), consoleAccessPrecondition()],
+  },
+  {
+    id: "SSH-007",
+    title: "Only administrative SSH ports are exposed",
+    category: "ssh",
+    platform: ["linux"],
+    description: "sshd should listen only on the authorized administrative port(s).",
+    rationale:
+      "Every additional sshd listening port is extra Internet-facing attack surface (port 22 in particular is scanned constantly). Removing ports the operator does not use reduces exposure without affecting the authorized management port.",
+    desiredState: "sshd listens only on the authorized administrative port(s)",
+    requiresApproval: true,
+    reversible: true,
+    dependencies: ["SSH-002"],
+    tags: ["ssh", "exposure"],
+    references: ["OpenSSH sshd_config(5) Port", "CIS Controls v8 4.4"],
+    baseRisk: {
+      securityImpact: "medium",
+      availabilityRisk: "none",
+      lockoutRisk: "low",
+      operationalComplexity: "low",
+    },
+    applicability: (inv) => sshApplicability(inv),
+    assess: (inv, ctx) => {
+      const observed = (inv.sockets.data?.sockets ?? [])
+        .filter((s) => s.port !== null && s.processName !== null && /ssh/i.test(s.processName))
+        .map((s) => s.port as number);
+      const authorized = ctx.management.sshPort ?? null;
+      const evidence = [
+        ref("sockets.data.sockets[sshd]", observed.join(", ") || "none"),
+        ref("context.management.sshPort", authorized === null ? null : String(authorized)),
+      ];
+      if (authorized === null) {
+        return requiresContext(
+          `sshd listening on: ${observed.join(", ") || "(none)"}`,
+          "the authorized administrative SSH port(s) are needed to identify extra ports",
+          ["management.sshPort"],
+          evidence,
+        );
+      }
+      const extra = observed.filter((port) => port !== authorized);
+      if (extra.length > 0) {
+        return nonCompliant(
+          `ports: ${observed.join(", ")} (authorized: ${authorized})`,
+          `sshd listens on ${extra.join(", ")}, which is not the authorized port`,
+          evidence,
+        );
+      }
+      return compliant(
+        `ports: ${observed.join(", ")}`,
+        "sshd exposes only the authorized administrative port",
+        evidence,
+      );
+    },
   },
 ];
 
