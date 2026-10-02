@@ -118,6 +118,8 @@ export interface LinuxRaw {
   security: {
     getenforce: RawCommand;
     appArmorEnabled: FileRead;
+    ufwStatus: RawCommand;
+    firewalldState: RawCommand;
     detectedBinaries: Readonly<Record<string, string | null>>;
   };
   filesystems: {
@@ -241,7 +243,11 @@ export async function collectLinuxRaw(deps: CollectorDependencies): Promise<Linu
     detectedBinaries[name] = await detectBinary(files, name);
   }
 
-  const getenforce = await run(runner, "getenforce", []);
+  const [getenforce, ufwStatus, firewalldState] = await Promise.all([
+    run(runner, "getenforce", []),
+    run(runner, "ufw", ["status"]),
+    run(runner, "firewall-cmd", ["--state"]),
+  ]);
   const appArmorEnabled = await files.readText("/sys/module/apparmor/parameters/enabled");
 
   const [findmnt, df, lsblk] = await Promise.all([
@@ -289,7 +295,7 @@ export async function collectLinuxRaw(deps: CollectorDependencies): Promise<Linu
     },
     services: { systemdRunning, systemctlUnits, systemctlUnitFiles, isActive, isEnabled },
     packages: { dpkgQuery, rpmQuery },
-    security: { getenforce, appArmorEnabled, detectedBinaries },
+    security: { getenforce, appArmorEnabled, ufwStatus, firewalldState, detectedBinaries },
     filesystems: { findmnt, df, lsblk, procMounts },
     time: { timedatectlShow },
     containers: { dockerVersion, podmanVersion, containerdVersion, k3sVersion, kubeletVersion },

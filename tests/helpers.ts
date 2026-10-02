@@ -161,6 +161,8 @@ export function runnerEntries(): Record<string, CommandOutcome | string> {
     df: ok(loadFixture("df.txt")),
     lsblk: ok(loadFixture("lsblk.json")),
     getenforce: unavailable(),
+    "ufw status": ok("Status: active"),
+    "firewall-cmd --state": unavailable(),
     "timedatectl show": ok(loadFixture("timedatectl-show.txt")),
     "docker --version": ok("Docker version 27.5.1, build abc123\n"),
     "containerd --version": ok("containerd github.com/containerd/containerd v1.7.24\n"),

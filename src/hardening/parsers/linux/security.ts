@@ -131,9 +131,19 @@ function firewallState(
   const primaryUnit = FIREWALL_IMPLS.find((i) => i.name === (detected[0] ?? ""))?.units[0];
   const control = primaryUnit ? serviceControl(states, primaryUnit) : null;
 
+  // `systemctl is-active ufw` is unreliable (oneshot), so prefer each
+  // implementation's own status command when available.
+  let active: boolean | null = control ? control.active : null;
+  const primaryName = detected[0] ?? "";
+  if (primaryName === "ufw" && raw.ufwStatus.outcome.status === "ok") {
+    active = /Status:\s*active/i.test(raw.ufwStatus.outcome.stdout);
+  } else if (primaryName === "firewalld" && raw.firewalldState.outcome.status === "ok") {
+    active = raw.firewalldState.outcome.stdout.trim() === "running";
+  }
+
   return {
     implementation: evidence,
-    active: control ? control.active : null,
+    active,
     enabled: control ? control.enabled : null,
     detectedImplementations: detected,
   };
