@@ -391,12 +391,34 @@ export async function domainAction(
 
 /** After an access-affecting change, prove a NEW connection from here works. */
 async function reconnectCheck(host: Host, request: ExecuteRequest): Promise<string> {
-  const connection = await host.verifyConnection();
+  const attempts = 3;
+  let connection = await host.verifyConnection();
+  for (let i = 1; i < attempts && connection.status !== "ok"; i++) {
+    // Servers may temporarily rate-limit fresh connections; retry before
+    // concluding the change locked us out.
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    connection = await host.verifyConnection();
+  }
   if (connection.status === "ok") {
     return "\nreconnect check: OK — a new SSH session from the workstation succeeded.";
   }
+
+  const kind = connection.failureKind ?? connection.status;
+  if (kind === "auth" || kind === "host-key") {
+    const rollback = await rollbackControl(request);
+    return `\nreconnect check: FAILED (${kind}). Automatic rollback attempted: ${rollback.message}`;
+  }
+
+  // connection/timeout: may be transient rate limiting. Confirm the authorized
+  // administrative port is still listening before deciding.
+  const port = request.context.management.sshPort ?? null;
+  const ss = await host.exec("ss", ["-tln"]);
+  const listening = port !== null && new RegExp(`:${port}\\s`).test(ss.stdout);
+  if (listening) {
+    return `\nreconnect check: not confirmed (${kind}); the authorized port ${port} is still listening, so the change was kept. Retry SSH if the session drops.`;
+  }
   const rollback = await rollbackControl(request);
-  return `\nreconnect check: FAILED (${connection.failureKind ?? connection.status}). Automatic rollback attempted: ${rollback.message}`;
+  return `\nreconnect check: FAILED (${kind}) and port ${port ?? "?"} is not listening. Automatic rollback attempted: ${rollback.message}`;
 }
 
 // --- Misc ------------------------------------------------------------------
