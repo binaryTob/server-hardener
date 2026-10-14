@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Interactive, read-only-first server hardening framework. Phase 1: discovery and inventory.",
+  "description": "Local OpenCode agent for SSH-based Linux discovery, risk assessment and verified hardening with remote backups.",
+  "engines": {
+    "bun": ">=1.4.3"
+  },
+  "packageManager": "bun@1.4.3",
   "scripts": {
     "format": "biome format --write .",
     "lint": "biome check .",

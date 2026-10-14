@@ -47,6 +47,12 @@ async function firewalldActive(ctx: RemediationContext): Promise<boolean | null>
 
 async function preview(ctx: RemediationContext): Promise<RemediationPreview> {
   const kind = implementation(ctx);
+  if (kind === "firewalld") {
+    return manual(
+      ctx,
+      "firewalld requires a reviewed zone/interface and administrative-port policy; automatic activation is disabled",
+    );
+  }
   if (kind === "nftables") {
     return manual(
       ctx,
@@ -58,19 +64,10 @@ async function preview(ctx: RemediationContext): Promise<RemediationPreview> {
   }
   const ports = administrativePorts(ctx);
   const warnings: string[] = [];
-  if (kind === "ufw" && ports.length === 0) {
-    warnings.push(
-      "no SSH listener was observed; ensure the administrative port is allowed before enabling the firewall to avoid lockout",
-    );
+  if (ports.length === 0) {
+    return manual(ctx, "no administrative SSH port is known; refusing to enable a firewall");
   }
-  const commands =
-    kind === "ufw"
-      ? [...ports.map((p) => `ufw allow ${p}/tcp`), "ufw --force enable"]
-      : [
-          "firewall-cmd --permanent --add-service=ssh",
-          "firewall-cmd --reload",
-          "systemctl enable --now firewalld",
-        ];
+  const commands = [...ports.map((p) => `ufw allow ${p}/tcp`), "ufw --force enable"];
   return {
     controlId: ctx.control.controlId,
     title: ctx.control.title,
@@ -78,11 +75,7 @@ async function preview(ctx: RemediationContext): Promise<RemediationPreview> {
     manualReason: null,
     currentState: `implementation: ${kind}`,
     desiredState: "host firewall active without closing administrative access",
-    steps: [
-      kind === "ufw"
-        ? "ensure administrative port(s) are allowed, then enable"
-        : "allow ssh service in the default zone, reload, ensure firewalld is running",
-    ],
+    steps: ["ensure administrative port(s) are allowed, then enable"],
     files: [],
     commands,
     warnings,
@@ -134,7 +127,7 @@ async function verify(ctx: RemediationContext): Promise<VerificationResult> {
 
 async function apply(ctx: RemediationContext): Promise<RemediationApplyResult> {
   const kind = implementation(ctx);
-  if (kind === "nftables" || kind === null) {
+  if (kind !== "ufw") {
     return {
       changed: false,
       target: "firewall",
@@ -147,20 +140,44 @@ async function apply(ctx: RemediationContext): Promise<RemediationApplyResult> {
       message: "manual remediation required for this firewall implementation",
     };
   }
-  const wasActive = kind === "ufw" ? await ufwActive(ctx) : await firewalldActive(ctx);
-  if (kind === "ufw") {
-    for (const port of administrativePorts(ctx)) {
-      await ctx.runner.run("ufw", ["allow", `${port}/tcp`]);
-    }
-    await ctx.runner.run("ufw", ["--force", "enable"]);
-  } else {
-    await ctx.runner.run("firewall-cmd", ["--permanent", "--add-service=ssh"]);
-    await ctx.runner.run("firewall-cmd", ["--reload"]);
-    await ctx.runner.run("systemctl", ["enable", "--now", "firewalld"]);
+  const wasActive = await ufwActive(ctx);
+  const ports = administrativePorts(ctx);
+  if (wasActive === null || ports.length === 0 || wasActive) {
+    return {
+      changed: false,
+      target: kind,
+      before: null,
+      after: null,
+      backupIds: [],
+      verification: await verify(ctx),
+      strategy: null,
+      reversible: false,
+      message: wasActive
+        ? "ufw already active; no rules changed"
+        : "refusing firewall activation: current state or administrative port is unknown",
+    };
   }
+  for (const port of ports) {
+    const allowed = await ctx.runner.run("ufw", ["allow", `${port}/tcp`]);
+    if (allowed.status !== "ok") {
+      return {
+        changed: false,
+        target: kind,
+        before: null,
+        after: null,
+        backupIds: [],
+        verification: await verify(ctx),
+        strategy: null,
+        reversible: false,
+        message:
+          "administrative allow rule failed; firewall was not enabled; review any previously added allow rules",
+      };
+    }
+  }
+  await ctx.runner.run("ufw", ["--force", "enable"]);
   const verification = await verify(ctx);
   return {
-    changed: wasActive !== true,
+    changed: true,
     target: kind,
     before: JSON.stringify({ implementation: kind, active: wasActive }),
     after: JSON.stringify({ implementation: kind, active: true }),
@@ -168,7 +185,7 @@ async function apply(ctx: RemediationContext): Promise<RemediationApplyResult> {
     verification,
     strategy: "disable-firewall-if-not-previously-active",
     reversible: true,
-    message: `${kind} enabled; administrative access preserved`,
+    message: `${kind} activation attempted after administrative allow rules; fresh SSH reconnection still required`,
   };
 }
 

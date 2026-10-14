@@ -77,10 +77,14 @@ async function ensureBackupDir(
   return null;
 }
 
-async function buildContext(request: ExecuteRequest, runId: string): Promise<RemediationContext> {
+async function buildContext(
+  request: ExecuteRequest,
+  runId: string,
+  prepareBackup = false,
+): Promise<RemediationContext> {
   const hasRoot = request.hasRoot ?? false;
   const sudo = request.sudo ?? false;
-  const backupDir = await ensureBackupDir(request.host, runId, hasRoot, sudo);
+  const backupDir = prepareBackup ? await ensureBackupDir(request.host, runId, hasRoot, sudo) : null;
   const privileged: CommandRunner = { run: (command, args) => request.host.runPrivileged(command, args) };
   const context: RemediationContext = {
     host: request.host,
@@ -155,7 +159,7 @@ export async function applyControl(request: ExecuteRequest): Promise<ExecutionOu
     return refused(request, connectionMessage(connection));
   }
 
-  const ctx = await buildContext(request, newRunId());
+  const ctx = await buildContext(request, newRunId(), true);
   const result = await remediation.apply(ctx);
   await record(request, "apply", result, ctx);
   return {
@@ -198,7 +202,7 @@ export async function rollbackControl(request: ExecuteRequest): Promise<Executio
     return refused(request, "rollback needs administrative privileges on the target.");
   }
 
-  const ctx = await buildContext(request, previous.runId);
+  const ctx = await buildContext(request, previous.runId, true);
   let result: RemediationApplyResult;
   try {
     result = await remediation.rollback(ctx, previous.change);

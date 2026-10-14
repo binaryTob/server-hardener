@@ -10,7 +10,7 @@ import path from "node:path";
 import hardenSysctl from "../.opencode/tools/harden_sysctl";
 import inspectSystem from "../.opencode/tools/inspect_system";
 import targetTool from "../.opencode/tools/target";
-import { assess, controlBelongsToDomain } from "../src/hardening/agent";
+import { assess, connectTarget, controlBelongsToDomain } from "../src/hardening/agent";
 import {
   CommandSafetyError,
   NoTargetError,
@@ -18,10 +18,16 @@ import {
   ToolArgumentError,
 } from "../src/hardening/errors";
 import { assertSafeCommand, ExecCommandRunner } from "../src/hardening/exec";
-import { assertSafeId } from "../src/hardening/store";
+import { assertSafeId, readContext, saveContext } from "../src/hardening/store";
 import { buildRemoteCommand } from "../src/hardening/transport/quote";
-import { buildSshArgv, classifyRemoteResult, classifySshFailure } from "../src/hardening/transport/ssh";
+import {
+  buildSshArgv,
+  classifyRemoteResult,
+  classifySshFailure,
+  SshHost,
+} from "../src/hardening/transport/ssh";
 import { parseTarget } from "../src/hardening/transport/target";
+import { sampleContext } from "./support";
 
 describe("target validation", () => {
   test("accepts alias, user@host, user@ip and bare host", () => {
@@ -68,6 +74,7 @@ describe("safe ssh argv", () => {
     expect(argv.at(-1)).toBe("'cat' '/etc/ssh/sshd_config'");
     expect(argv).toContain("-o");
     expect(argv).toContain("admin@server.example");
+    expect(argv.indexOf("--")).toBeLessThan(argv.indexOf("admin@server.example"));
   });
 
   test("sudo uses non-interactive sudo -n", () => {
@@ -183,6 +190,27 @@ describe("domain confinement", () => {
 });
 
 describe("state id safety", () => {
+  test("host identity distinguishes explicit SSH ports", () => {
+    const first = new SshHost(parseTarget("admin@server.example:2200"));
+    const second = new SshHost(parseTarget("admin@server.example:2222"));
+    expect(first.label).not.toBe(second.label);
+  });
+
+  test("switching target or port discards prior operational approvals", async () => {
+    const storeRoot = await mkdtemp(path.join(tmpdir(), "hardener-context-"));
+    const deps = { hostOptions: { sshBinary: "true" } }; // no network: argv consumed by true
+    try {
+      await connectTarget(storeRoot, "admin@server.example:2200", deps);
+      await saveContext(storeRoot, sampleContext());
+      await connectTarget(storeRoot, "admin@server.example:2222", deps);
+      const context = await readContext(storeRoot);
+      expect(context?.management.secondaryPathConfirmed).not.toBe(true);
+      expect(context?.management.sshPort).toBe(2222);
+    } finally {
+      await rm(storeRoot, { recursive: true, force: true });
+    }
+  });
+
   test("backup/verification ids cannot escape the store", () => {
     const pattern = /^(bkp|ver)-[a-z0-9][a-z0-9-]{7,63}$/;
     for (const bad of ["../../etc", "../bkp", "/tmp/bkp", "bkp", "bkp/a"]) {

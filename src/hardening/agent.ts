@@ -124,6 +124,10 @@ export async function connectTarget(
     sudo: probe.sudo,
     isLocalhost: spec.isLocalhost,
   };
+  const previousSession = await readSession(storeRoot);
+  if (previousSession?.target !== info.target) {
+    await saveContext(storeRoot, emptyContext(now(deps)));
+  }
   await writeSession(storeRoot, info);
   if (spec.port !== null) {
     const stored = await readContext(storeRoot);
@@ -177,7 +181,9 @@ async function assessHost(
   deps: AgentDeps,
 ): Promise<Assessment> {
   const inventory = await runDiscovery({ runner: host, files: host, platform: host.platformHint });
-  const stored = await readContext(storeRoot);
+  const session = await readSession(storeRoot);
+  // Approval/context for one destination must never authorize another host or port.
+  const stored = session?.target === spec.raw ? await readContext(storeRoot) : null;
   let context = withDetectedRoles(stored ?? emptyContext(now(deps)), inventory);
   if ((context.management.sshPort ?? null) === null && spec.port !== null) {
     context = { ...context, management: { ...context.management, sshPort: spec.port } };
@@ -390,7 +396,7 @@ export async function domainAction(
 }
 
 /** After an access-affecting change, prove a NEW connection from here works. */
-async function reconnectCheck(host: Host, request: ExecuteRequest): Promise<string> {
+export async function reconnectCheck(host: Host, request: ExecuteRequest): Promise<string> {
   const attempts = 3;
   let connection = await host.verifyConnection();
   for (let i = 1; i < attempts && connection.status !== "ok"; i++) {
@@ -403,22 +409,12 @@ async function reconnectCheck(host: Host, request: ExecuteRequest): Promise<stri
     return "\nreconnect check: OK — a new SSH session from the workstation succeeded.";
   }
 
+  // A listening socket does not prove reachability through the firewall or
+  // successful authentication. Use the retained connection to attempt recovery.
   const kind = connection.failureKind ?? connection.status;
-  if (kind === "auth" || kind === "host-key") {
-    const rollback = await rollbackControl(request);
-    return `\nreconnect check: FAILED (${kind}). Automatic rollback attempted: ${rollback.message}`;
-  }
-
-  // connection/timeout: may be transient rate limiting. Confirm the authorized
-  // administrative port is still listening before deciding.
-  const port = request.context.management.sshPort ?? null;
-  const ss = await host.exec("ss", ["-tln"]);
-  const listening = port !== null && new RegExp(`:${port}\\s`).test(ss.stdout);
-  if (listening) {
-    return `\nreconnect check: not confirmed (${kind}); the authorized port ${port} is still listening, so the change was kept. Retry SSH if the session drops.`;
-  }
   const rollback = await rollbackControl(request);
-  return `\nreconnect check: FAILED (${kind}) and port ${port ?? "?"} is not listening. Automatic rollback attempted: ${rollback.message}`;
+  const recovered = await host.verifyConnection();
+  return `\nreconnect check: FAILED (${kind}). Automatic rollback attempted: ${rollback.message}. Fresh connection after rollback: ${recovered.status === "ok" ? "OK" : "NOT CONFIRMED; use the secondary management path"}.`;
 }
 
 // --- Misc ------------------------------------------------------------------

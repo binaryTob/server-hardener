@@ -18,15 +18,19 @@ target.
 ## 1. Product
 
 ```
-git clone server-hardener && cd server-hardener && bun install
+git clone https://github.com/binaryTob/server-hardener.git
+cd server-hardener
+bun install --frozen-lockfile --ignore-scripts
 opencode
 > harden admin@server.example
 ```
 
 The agent identifies the target, verifies SSH, runs read-only discovery, groups
 hardening candidates by risk, asks the decision-critical questions, applies the
-selected changes with remote backups and verification, rolls back on failure and
-reports.
+selected changes with remote file backups and verification, supports per-control
+rollback and reports. Syntax failure restores SSH configuration immediately;
+failed fresh SSH reconnection triggers a rollback attempt. Other verification
+failures require operator review rather than a global automatic transaction.
 
 ## 2. Layers
 
@@ -88,15 +92,19 @@ the operator tier (`safe`/`review`/`risky`). No numeric score.
 
 Preview → apply → verify → rollback, per control:
 - **Backups live on the target** at `/var/backups/server-hardener/<run-id>/`
-  (content + SHA-256 + owner/group/mode), so nothing sensitive is pulled to the
-  workstation and rollback works remotely.
-- sysctl, SSH, firewall (ufw/firewalld only), services (known-insecure only),
+  (content + SHA-256 + owner/group/mode, mode 0600). Config content passes through
+  workstation memory while reading, editing and creating/restoring backups.
+  Restore checks content integrity before writing; config edits preserve mode.
+- sysctl, SSH, firewall (UFW activation; firewalld/nftables manual), services (known-insecure only),
   logging/audit, filesystem fstab. Everything else is `manual remediation
   required`.
 - **SSH/firewall reconnection check:** after an access-affecting change the tool
   opens a NEW ssh connection from the workstation; if it fails it attempts a
-  rollback. Firewall never closes the operator's access and never defaults-deny
-  first.
+  rollback over the retained session and checks a fresh connection again. A
+  listening port is not accepted as proof of operator access. There is no remote
+  recovery timer; use a verified secondary management path. UFW activation needs
+  successful administrative allow rules first; firewalld zone-aware activation
+  is not implemented. Firewall rollback restores activation, not all rules.
 
 ## 7. Privileges
 
@@ -112,6 +120,11 @@ password is ever captured or stored.
 ├── last-run.json          applied/skipped/failed/rolled-back + verification
 └── optional-context.json  operator-supplied operational context
 ```
+
+Context is used only for the selected session target. Connecting to a different
+target/explicit port clears old approvals and management details. Explicit SSH
+ports are part of rollback host identity. Alias resolution changes are outside
+this string-based identity; reconfirm context if an alias is repointed.
 
 ## 9. Tests
 

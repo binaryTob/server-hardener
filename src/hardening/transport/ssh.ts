@@ -115,7 +115,7 @@ export function buildSshArgv(
       : controlPath === "disabled"
         ? ["-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no"]
         : ["-o", "ControlMaster=auto", "-o", `ControlPath=${controlPath}`, "-o", "ControlPersist=60"];
-  return [...sshBaseArgs(), ...controlArgs, ...portArgs, destination, "--", remote];
+  return [...sshBaseArgs(), ...controlArgs, ...portArgs, "--", destination, remote];
 }
 
 export class SshHost implements Host {
@@ -135,7 +135,7 @@ export class SshHost implements Host {
   constructor(spec: TargetSpec, options: SshHostOptions = {}) {
     this.destination = sshDestination(spec);
     this.port = spec.port;
-    this.label = this.destination;
+    this.label = spec.port === null ? this.destination : `${this.destination}:${spec.port}`;
     this.controlPath =
       options.controlPath !== undefined
         ? options.controlPath === "disabled"

@@ -3,6 +3,7 @@
  * rollback and safety gates. No real host, no SSH.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { reconnectCheck } from "../src/hardening/agent";
 import type { ControlEvaluationStatus, EvaluatedControl } from "../src/hardening/models";
 import {
   applyControl,
@@ -50,16 +51,66 @@ function request(current: ExecEnv, control: EvaluatedControl, targetUnit?: strin
 describe("preview is read-only", () => {
   test("SSH preview changes nothing", async () => {
     const current = await env();
+    const commands: string[] = [];
+    const exec = current.host.exec.bind(current.host);
+    current.host.exec = (command, args, options) => {
+      commands.push(command);
+      return exec(command, args, options);
+    };
     const before = current.host.files.get("/etc/ssh/sshd_config");
     const control = withStatus(evaluate("SSH-005", current.inventory, current.context), "non-compliant");
     const outcome = await previewControl(request(current, control));
     expect(outcome.preview?.manual).toBe(false);
     expect(outcome.preview?.desiredState).toContain("MaxAuthTries 4");
     expect(current.host.files.get("/etc/ssh/sshd_config")).toBe(before);
+    await verifyControl(request(current, control));
+    expect(commands).not.toContain("mkdir");
   });
 });
 
 describe("SSH apply / verify / rollback", () => {
+  test("apply preserves restrictive config permissions", async () => {
+    const current = await env();
+    await current.host.chmod("/etc/ssh/sshd_config", 0o600);
+    const control = withStatus(evaluate("SSH-005", current.inventory, current.context), "non-compliant");
+    await applyControl(request(current, control));
+    expect((await current.host.stat("/etc/ssh/sshd_config"))?.mode).toBe(0o600);
+  });
+
+  test("tampered backup is rejected before restoring config", async () => {
+    const current = await env();
+    const control = withStatus(evaluate("SSH-005", current.inventory, current.context), "non-compliant");
+    await applyControl(request(current, control));
+    const entry = (await readLastRun(current.storeRoot))?.entries.at(-1);
+    const file = `${entry?.backupDir}/${entry?.backupIds[0]}.json`;
+    const backup = JSON.parse(current.host.files.get(file) ?? "{}");
+    backup.content = "tampered fixture content";
+    current.host.files.set(file, JSON.stringify(backup));
+    const outcome = await rollbackControl(request(current, control));
+    expect(outcome.message).toContain("integrity");
+    expect(current.host.files.get("/etc/ssh/sshd_config")).toContain("MaxAuthTries 4");
+  });
+
+  test("failed fresh connection rolls back even if a listener could remain", async () => {
+    const current = await env();
+    const control = withStatus(evaluate("SSH-005", current.inventory, current.context), "non-compliant");
+    const req = request(current, control);
+    await applyControl(req);
+    current.host.verifyConnection = async () => ({
+      status: "timeout",
+      stdout: "",
+      stderr: "",
+      exitCode: null,
+      notRun: false,
+      failureKind: "timeout",
+    });
+    const result = await reconnectCheck(current.host, req);
+    expect(result).toContain("Automatic rollback attempted");
+    expect(result).toContain("NOT CONFIRMED");
+    expect(current.host.files.get("/etc/ssh/sshd_config")).toContain("MaxAuthTries 6");
+    expect((await readLastRun(current.storeRoot))?.entries.at(-1)?.action).toBe("rollback");
+  }, 10000);
+
   test("apply edits config, backs it up on the target, verifies and records the run", async () => {
     const current = await env();
     const control = withStatus(evaluate("SSH-005", current.inventory, current.context), "non-compliant");
@@ -157,6 +208,39 @@ describe("services", () => {
 });
 
 describe("firewall safety", () => {
+  test("firewalld activation is manual until zone-aware access is implemented", async () => {
+    const current = await env();
+    const inventory = structuredClone(current.inventory);
+    if (inventory.securityControls.data?.firewall)
+      inventory.securityControls.data.firewall.detectedImplementations = ["firewalld"];
+    const control = withStatus(evaluate("FW-001", inventory, current.context), "non-compliant");
+    const outcome = await applyControl({ ...request(current, control), inventory });
+    expect(outcome.changed).toBe(false);
+    expect(current.host.firewalldState).toBe("not running");
+  });
+
+  test("failed administrative allow rule prevents firewall activation", async () => {
+    const current = await env();
+    const inventory = structuredClone(current.inventory);
+    if (inventory.securityControls.data?.firewall)
+      inventory.securityControls.data.firewall.detectedImplementations = ["ufw"];
+    const exec = current.host.exec.bind(current.host);
+    current.host.exec = (command, args, options) =>
+      command === "ufw" && args[0] === "allow"
+        ? Promise.resolve({
+            status: "error",
+            stdout: "",
+            stderr: "fixture failure",
+            exitCode: 1,
+            notRun: false,
+          })
+        : exec(command, args, options);
+    const control = withStatus(evaluate("FW-001", inventory, current.context), "non-compliant");
+    const outcome = await applyControl({ ...request(current, control), inventory });
+    expect(outcome.changed).toBe(false);
+    expect(current.host.ufwStatusText).toBe("Status: inactive");
+  });
+
   test("nftables is never changed automatically", async () => {
     const current = await env();
     const inventory = structuredClone(current.inventory);
