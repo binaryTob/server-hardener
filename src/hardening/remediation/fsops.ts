@@ -37,9 +37,10 @@ export async function writeConfig(
   ctx: RemediationContext,
   file: string,
   content: string,
-  mode = 0o644,
+  mode?: number,
 ): Promise<void> {
-  await ctx.host.writeTextPrivileged(file, content, mode);
+  const existing = mode === undefined ? await ctx.host.stat(file) : null;
+  await ctx.host.writeTextPrivileged(file, content, mode ?? existing?.mode ?? 0o644);
 }
 
 export async function deleteConfig(ctx: RemediationContext, file: string): Promise<void> {
@@ -105,6 +106,9 @@ export async function restoreBackup(ctx: RemediationContext, backupId: string): 
     throw new StateError(`backup ${backupId} is corrupt`, { cause: err });
   }
   const backup = validateBackupRecord(parsed);
+  if (sha256Hex(backup.content) !== backup.sha256) {
+    throw new StateError(`backup ${backupId} failed integrity verification`);
+  }
   await ctx.host.writeTextPrivileged(backup.originalPath, backup.content, backup.mode ?? 0o644);
   if (backup.mode !== null) await ctx.host.chmod(backup.originalPath, backup.mode);
   if (backup.uid !== null && backup.gid !== null)
