@@ -1,33 +1,33 @@
 # Server-Hardener
 
-Agente **de OpenCode que corre en tu workstation** y hardeniza **un servidor
-Linux objetivo por SSH**. El servidor objetivo **no instala nada**: ni OpenCode,
-ni Bun, ni Node, ni este repo, ni API keys, ni un agente/daemon.
+An **OpenCode agent running on your workstation** that hardens **one target Linux
+server over SSH**. The target does not need OpenCode, Bun, Node, this repository,
+API keys, or a framework agent/daemon installed.
 
-Es reutilizable para cualquier servidor al que tengas acceso SSH: no es fleet
-management, no es multi-servidor, no es una plataforma.
+It is reusable across servers you can administer over SSH. Each session operates
+on one target; there is no fleet-management platform.
 
 ```text
-Workstation (OpenCode + server-hardener)  ── SSH ──▶  Servidor objetivo (sshd)
+Workstation (OpenCode + server-hardener)  ── SSH ──▶  Target server (sshd)
 ```
 
-SSH es solo el transporte de las tools.
+SSH transports the tools' operations. TypeScript implements discovery,
+deterministic assessment and bounded remediation; OpenCode provides reasoning and
+operator interaction. The runtime has no embedded LLM or unattended execution of
+all controls.
 
-El código TypeScript implementa discovery, evaluación determinista y operaciones
-acotadas; OpenCode aporta la sesión de razonamiento y la interacción con el
-operador. No hay un LLM embebido en el runtime ni una ejecución desatendida de
-todos los controles.
+## Requirements
 
-## Requisitos
+- [Bun](https://bun.sh) ≥ 1.4.3, OpenCode and OpenSSH **on the workstation**.
+- SSH access using your normal configuration: a `~/.ssh/config` alias,
+  `user@host`, `user@IP`, or `host:port` for a non-standard port. SSH agent,
+  `IdentityFile`, `ProxyJump` and `known_hosts` settings are honored.
+- On the target: root SSH access **or** an administrator with passwordless
+  `sudo -n`.
+- Authentication is delegated to your own `ssh`; the framework does not collect
+  or store passwords or private keys.
 
-- [Bun](https://bun.sh) ≥ 1.4.3, OpenCode y OpenSSH **en la workstation**.
-- Acceso SSH al target con tu configuración normal: alias de `~/.ssh/config`,
-  `user@host`, `user@IP`, o `host:puerto` para puertos no estándar; ssh-agent,
-  `IdentityFile`, `ProxyJump` y `known_hosts` se respetan tal cual.
-- En el target: root por SSH **o** un usuario admin con `sudo -n` sin password.
-- No se usan ni almacenan credenciales: se delega en tu propio `ssh`.
-
-## Puesta en marcha (solo en la workstation)
+## Getting started (workstation only)
 
 ```bash
 git clone https://github.com/binaryTob/server-hardener.git
@@ -36,35 +36,33 @@ bun install --frozen-lockfile --ignore-scripts
 opencode
 ```
 
-Luego, dentro de OpenCode:
-
-Seleccioná el agente `server-hardener` y proporcioná el target:
+Select the `server-hardener` agent in OpenCode and provide a target:
 
 ```text
-> Hardenizá srv-ejemplo
-> Hardenizá admin@192.0.2.10
-> Hardenizá root@192.0.2.10:2222     # puerto no estándar
+> Harden example-server
+> Harden admin@192.0.2.10
+> Harden root@192.0.2.10:2222     # non-standard port
 ```
 
-Si escribís *"hardenizá este servidor"* sin target, el agente **pregunta cuál**
-(no asume `localhost`).
+If you ask to *"harden this server"* without specifying a target, the agent asks
+which server to use. It never assumes `localhost`.
 
-## Qué hace
+## Workflow
 
-1. Valida el target y prueba la conexión SSH.
-2. Ejecuta **discovery remoto read-only** (SO, red, sockets, usuarios,
-   servicios, paquetes, firewall/logging, mounts, contenedores).
-3. Evalúa el catálogo de controles y agrupa en **SAFE / REVIEW / RISKY**
-   (sin score numérico).
-4. Pregunta **solo** el contexto operativo que cambia una decisión.
-5. Por cada control elegido: `preview` → **confirmación explícita** → `apply`
-   remoto → `verify`. Los cambios de archivos guardan backups en el target;
-   servicios/firewall registran su estado previo. Un fallo de sintaxis SSH restaura
-   la configuración; un fallo de reconexión intenta rollback. Otros fallos deben
-   revisarse y solicitar rollback explícito: no existe una transacción global.
-6. Entrega un resumen final (aplicados / omitidos / fallidos / revertidos).
+1. Validate the target and test SSH connectivity.
+2. Run **read-only remote discovery**: OS, network, sockets, users, services,
+   packages, firewall/logging, mounts and containers.
+3. Evaluate the control catalog and group candidates into **SAFE / REVIEW /
+   RISKY**, without a numeric score.
+4. Ask only for operational context that affects a decision.
+5. For each selected control: `preview` → **explicit confirmation** → remote
+   `apply` → `verify`. File changes have remote backups; services/firewall record
+   their previous state. An SSH syntax failure restores configuration, and a
+   reconnect failure triggers a rollback attempt. Other failures require review
+   and an explicit rollback request; there is no global transaction.
+6. Report applied, skipped, failed and rolled-back controls.
 
-### CLI (read-only)
+### Read-only CLI
 
 ```bash
 bun run inspect admin@192.0.2.10
@@ -72,90 +70,90 @@ bun run inspect admin@192.0.2.10
 
 ## Tools
 
-- `target` — `connect` | `info` | `clear` (target activo de la sesión).
-- `inspect_system` — resumen del target (`inspect`, `last-run`).
-- `inspect_security` — evaluación (`assess`, `explain`).
+- `target` — `connect` | `info` | `clear`: the active session target.
+- `inspect_system` — target summary: `inspect`, `last-run`.
+- `inspect_security` — assessment: `assess`, `explain`.
 - `harden_sysctl` (KRN-*), `harden_ssh` (SSH-*), `harden_firewall` (FW-*),
   `harden_service` (SVC-*), `harden_logging` (LOG-*/AUD-*),
   `harden_filesystem` (FS-*): `inspect | preview | apply | verify | rollback`.
 
-`apply` y `rollback` requieren `confirm: true` tras confirmación explícita. Las
-tools **no aceptan comandos**: ejecutan operaciones predefinidas por `ssh` con
-argv (sin shell local), con backup y verificación.
+`apply` and `rollback` require `confirm: true` following explicit operator
+approval. Tools do not accept arbitrary commands: they execute predefined SSH
+operations using argv, without a local shell, with backup and verification.
 
-## Reglas de seguridad
+## Safety rules
 
-- Nunca asume `localhost`: sin target, pregunta.
-- Solo aplica controles `non-compliant` / `requires-review`.
-- **Lockout = stop:** `PasswordAuthentication no` se rechaza sin ruta secundaria
-  confirmada.
-- No reemplaza firewalls ni genera reglas nftables. La activación automática de
-  UFW requiere puertos administrativos conocidos y reglas allow exitosas antes
-  de habilitarlo. Firewalld requiere revisión manual de zonas/interfaces y puertos.
-- Tras cambios de SSH/firewall, verifica una **conexión SSH nueva** desde la
-  workstation, con hasta tres intentos; si falla, intenta rollback mediante la
-  sesión conservada y vuelve a probar. Un socket escuchando no demuestra acceso.
-- El rollback depende de que la sesión conservada siga operativa. No hay un timer
-  remoto de recuperación: mantené una consola/ruta secundaria verificada para
-  cambios de acceso. Ningún control garantiza por sí solo ausencia de lockout.
-- Cambiar de target o puerto descarta el contexto operativo anterior; las
-  confirmaciones de un servidor no se reutilizan para otro. Los aliases SSH que
-  cambien de destino requieren reconfirmar el contexto.
-- No instala dependencias del framework en el target (instalar `auditd` es una
-  decisión explícita de hardening, no una dependencia).
-- No captura ni guarda passwords. Requiere root o `sudo -n`.
+- Never assume `localhost`: ask for a target if none is selected.
+- Apply only `non-compliant` / `requires-review` controls.
+- **Lockout = stop:** setting `PasswordAuthentication no` is refused without a
+  confirmed secondary management path.
+- Do not replace firewalls or generate nftables rules. Automatic UFW activation
+  requires known administrative ports and successful allow rules before enabling
+  it. Firewalld requires manual review of zones, interfaces and ports.
+- After SSH/firewall changes, verify a **new SSH connection** from the workstation
+  with up to three attempts. On failure, attempt rollback through the retained
+  session and check again. A listening socket is not proof of access.
+- Rollback depends on the retained session remaining usable. There is no remote
+  recovery timer: keep a verified console/secondary path for access-affecting
+  changes. No individual control guarantees that lockout cannot occur.
+- Switching target or port clears previous operational context; one server's
+  approvals are not reused for another. Reconfirm context if an SSH alias is
+  repointed to a different destination.
+- Do not install framework dependencies on the target. Installing `auditd` is an
+  explicit hardening decision, not a framework prerequisite.
+- Never collect or save passwords. Privileged changes require root or `sudo -n`.
 
-## Backups y estado
+## Backups and state
 
-- Backups **en el target**: `/var/backups/server-hardener/<run-id>/` con
-  contenido, owner/group/mode y hash → rollback remoto con comprobación de
-  integridad. Los archivos de backup se escriben con modo `0600`.
-- La lectura/edición de configuración y el backup pasan por memoria de la
-  workstation; no son una transferencia exclusivamente interna al servidor.
-  Tratá la sesión de OpenCode y los registros operativos como información sensible.
-- Estado mínimo **en la workstation** (se ignora en git):
+- Backups live **on the target** at
+  `/var/backups/server-hardener/<run-id>/`, including content, owner/group/mode
+  and hash. Restore checks integrity; backup files are written with mode `0600`.
+- Reading/editing configuration and creating/restoring backups passes content
+  through workstation memory. Treat the OpenCode session and operational records
+  as sensitive information.
+- Minimal local state is stored **on the workstation** and ignored by Git:
 
 ```text
 .server-hardener/
-├── session.json           target activo de la sesión
-├── last-run.json          aplicados/omitidos/fallidos/revertidos + verificación
-└── optional-context.json  contexto operativo provisto por el operador
+├── session.json           active session target
+├── last-run.json          applied/skipped/failed/rolled-back controls + verification
+└── optional-context.json  operator-supplied operational context
 ```
 
-## Cobertura automática
+## Automated coverage
 
-- sysctl (KRN-001..004)
-- SSH: perfil de directivas (SSH-001..005) y **SSH-007** (exponer solo el puerto
-  admin), con backup + `sshd -t` + reload + verificación de reconexión
-- firewall (FW-001, activación UFW; firewalld/nftables son manuales)
-- servicios inseguros conocidos (SVC-001)
-- logging/auditoría (AUD-001/002, LOG-001)
-- fstab (FS-001/002)
+- sysctl (KRN-001..004).
+- SSH directives (SSH-001..005) and **SSH-007** (expose only the administrative
+  port), with backup, `sshd -t`, reload and reconnect verification.
+- Firewall (FW-001): UFW activation; firewalld/nftables are manual.
+- Known insecure services (SVC-001).
+- Logging/auditing (AUD-001/002, LOG-001).
+- fstab (FS-001/002).
 
-Todo lo demás es `manual remediation required` (nunca se aplica a ciegas).
-Los checks modelan estados desconocidos y precondiciones pendientes; SAFE no
-significa “aplicar sin autorización”. `localhost` explícito usa transporte local.
+Other controls return `manual remediation required`. Checks represent unknown
+states and unmet preconditions explicitly; SAFE does not mean "apply without
+authorization". Explicit `localhost` targets use local transport.
 
-## Arquitectura y límites
+## Architecture and limits
 
 ```text
-OpenCode agent + skills -> tools con argumentos acotados
+OpenCode agent + skills -> tools with bounded arguments
   -> agent.ts -> discovery / controls / planning
-  -> remediation -> Host (SSH por defecto) -> herramientas del SO
+  -> remediation -> Host (SSH by default) -> OS utilities
 ```
 
-`controls/` y `planning/` separan aplicabilidad, compliance y riesgo de la
-ejecución en `remediation/`. `transport/` valida el target y construye argv con
-quoting remoto. `store.ts` guarda el estado local mínimo.
+`controls/` and `planning/` separate applicability, compliance and risk from
+execution in `remediation/`. `transport/` validates targets and constructs argv
+with remote quoting. `store.ts` holds minimal local state.
 
-`preview` y `verify` no crean directorios de backup. La verificación automatizada
-usa fixtures y `FakeHost`; no equivale a una matriz de validación sobre todas las
-distribuciones, firewalls, PAM, includes/Match de SSH o servicios socket-activated.
-Una configuración no representada debe revisarse manualmente. El rollback de
-firewall restaura activación, no un snapshot completo de reglas; las reglas allow
-añadidas necesitan revisión si la operación falla.
+`preview` and `verify` do not create backup directories. Automated verification
+uses fixtures and `FakeHost`; it is not a validation matrix covering every Linux
+distribution, firewall, PAM configuration, SSH Include/Match rule or socket-activated
+service. Unrepresented configurations require manual review. Firewall rollback
+restores activation state, not a complete ruleset snapshot; added allow rules
+need review if an operation fails.
 
-## Desarrollo
+## Development
 
 ```bash
 bun run format     # biome format --write
@@ -163,16 +161,17 @@ bun run lint       # biome check
 bun run typecheck  # tsc --noEmit
 bun test           # bun:test
 bun run build      # tsc -> dist/
-bun run inspect <target>   # evaluación read-only
+bun run inspect <target>   # read-only assessment
 ```
 
-Arquitectura: `docs/ARCHITECTURE.md`.
-GitHub Actions ejecuta estos checks sin conectarse a servidores, audita las
-dependencias y escanea el historial con Gitleaks. Reiniciá OpenCode después de
-cambiar agentes, skills o tools para que recargue las definiciones.
+See [architecture](docs/ARCHITECTURE.md) and [verification](docs/VERIFICATION.md).
+GitHub Actions runs offline checks, audits dependencies and scans Git history
+with Gitleaks. Quit and restart OpenCode after changing agents, skills or tools
+so it reloads their definitions.
 
-## Fuera de alcance (a propósito)
+## Deliberately out of scope
 
-Fleet management, agentes/daemon remotos, API server, queue/scheduler, DB, web
-UI, orchestrator, Ansible/Terraform, deployment remoto del framework, Windows,
-scoring, pentesting, dashboards de compliance, motores de plan/estado complejos.
+Fleet management, remote agents/daemons, API server, queues/schedulers, database,
+web UI, orchestration, Ansible/Terraform, remote deployment of the framework,
+Windows, scoring, penetration testing, compliance dashboards and complex
+plan/state engines.
