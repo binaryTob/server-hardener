@@ -167,7 +167,7 @@ describe("SSH-007 removes unauthorized ports", () => {
     const current = await env();
     const context = { ...current.context, management: { ...current.context.management, sshPort: 2222 } };
     const control = withStatus(evaluate("SSH-007", current.inventory, context), "non-compliant");
-    const includePath = "/etc/ssh/sshd_config.d/90-puertos.conf";
+    const includePath = "/etc/ssh/sshd_config.d/90-ports.conf";
 
     const applied = await applyControl({ ...request(current, control), context });
     expect(applied.changed).toBe(true);
